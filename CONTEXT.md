@@ -1,0 +1,24 @@
+# AnchorLoop — glossary
+
+- **Engineer** — the human who owns project intent, task priority, key decisions, skill selection, and acceptance.
+- **Agent** — an AI coding agent. It may inspect, plan, implement, and run automated checks only within the active workflow phase.
+- **Anchor** — the local workflow controller: a Codex skill, an `anchor` CLI, and project-local state in `.anchor/`.
+- **Project** — a repository connected through `anchor init` or `anchor add`.
+- **Task** — a bounded change with a brief, state, workflow, decisions, evidence, and outcome.
+- **Brief** — the engineer-authored outcome, scope, constraints, invariant or acceptance case, and main uncertainty.
+- **Workflow** — a versioned sequence of task states and required human gates, such as `feature` or `bugfix`.
+- **Gate** — an explicit engineer action that authorizes the next task state. It is never inferred from conversational tone.
+- **Mode** — the control strength: `FAST`, `STANDARD`, or `CAREFUL`.
+- **Human artifact** — an engineer-authored acceptance case, invariant, root-cause hypothesis, rollback plan, or benchmark hypothesis.
+- **Verification** — automated evidence plus a human-performed scenario; green tests alone are not final verification.
+- **Comprehension check** — an engineer explanation, prediction, or debugging hypothesis produced without an AI-provided answer.
+- **Quality gate** — a deterministic and review-based pre-commit check of tests, code quality, and security evidence for the current diff. It does not create a commit.
+- **Code standards** — the always-on implementation rules: meaningful names, comments that explain why, small safe refactors, and context-sensitive DRY, KISS, YAGNI, and SOLID review.
+- **Rule proposal** — a proposed addition, change, or retirement of a project rule. It has no effect until the engineer approves its exact version.
+- **Active ruleset** — the immutable, versioned set of engineer-approved code-quality, security, and project-structure rules used for a task.
+- **Structure policy** — the engineer-approved description of source roots, module boundaries, allowed dependency directions, public module APIs, test placement, and generated-code boundaries.
+- **Structural change** — a change to a project root, module boundary, dependency direction, package/workspace, public module API, or file-location convention.
+- **Skill** — a reusable instruction package or tool integration.
+- **Skill policy** — the record of allowed, denied, and task-selected third-party or project skills.
+- **Graph map** — the Graphify knowledge graph used for scoped navigation before broad file search.
+- **Research result** — a cited external option; it is advice, not an approved decision.
