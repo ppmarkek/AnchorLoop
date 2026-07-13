@@ -5,8 +5,13 @@ build/
 dist/
 *.egg-info/
 graphify-out/
+node_modules/
+npm-debug.log*
+*.tgz
 
 # Generated local caches; never commit workflow or tool cache data.
 /cache/
 /.cache/
 /.anchor/cache/
+/.npm/
+/.npm-cache/

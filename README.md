@@ -8,7 +8,7 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 ## Status
 
-Pre-alpha. The first working core is available as a local Python CLI with an optional, installable agent-neutral skill adapter. It creates portable project state, enforces task gates, records rule approval, and provides a small local pre-commit baseline.
+Pre-alpha. The first working core is available as a local Python CLI with an optional, installable agent-neutral skill adapter. It creates portable project state, enforces task gates, records rule approval, and provides a small local pre-commit baseline. The repository also contains the npm launcher for a one-command Codex skill install; publishing that package is a separate release step.
 
 ## Core idea
 
@@ -22,6 +22,14 @@ AnchorLoop does not measure human-written lines. It focuses on the work that pre
 - selecting skills and external solutions;
 - checking the delivered behaviour;
 - learning when a concept or decision is unclear.
+
+## Delivery loop
+
+<img src="docs/assets/anchorloop-delivery-loop.svg" alt="AnchorLoop task flow from task through brief, plan, engineer approval, implementation, review, precommit, verification, and close, with an explicit revision route after failed verification." width="100%">
+
+AnchorLoop records the delivery loop: implementation follows an engineer-approved
+plan, and a failed verification returns through an explicit revision rather than
+silently reopening work.
 
 ## Trust boundary
 
@@ -55,6 +63,7 @@ Every host gets the same task states and approval rules. Native integrations mus
 ## What works now
 
 - `anchor install` and `anchor uninstall` preview then manage a packaged, project- or user-scoped skill adapter for generic Agent Skills or explicit Codex locations. They never modify the `.anchor/` workflow state.
+- Anchor-managed state and skill destinations reject symlink and Windows reparse-point components. Writes use unique temporary files plus atomic replacement; `--force` never bypasses that boundary.
 - Failed verification is preserved and can explicitly return to implementation or planning with `anchor revise`; it no longer strands the active task.
 - The quality gate records a deterministic workspace fingerprint. Verification and close are blocked when the checked code changes afterward.
 - `anchor init` and `anchor add` preview project setup and require `--apply` before creating files.
@@ -67,7 +76,40 @@ Every host gets the same task states and approval rules. Native integrations mus
 
 Graphify installation, full language-specific security tooling, project-specific test commands, external research, skill discovery, and native host adapters are planned next. AnchorLoop never installs them silently.
 
-## Install as a command-line tool
+## Install a Codex skill in one command
+
+Requirements: Node.js 18 or newer and Python 3.11 or newer.
+
+From the project you want to use with Codex:
+
+~~~sh
+npx anchorloop install
+~~~
+
+This creates only `.codex/skills/anchorloop/`; it does not create `.anchor/`,
+modify application code, or add `node_modules` or a cache to the project. The
+installed skill contains a pinned `npx --yes anchorloop@<version>` command
+runner, so selecting **AnchorLoop** through `/` (or writing `$anchorloop`) can
+use every workflow command even after the initial `npx` process exits.
+
+The shortcut defaults to the current project's Codex skill location. Use
+`--platform agents` for the cross-framework Agent Skills location, `--global`
+for a user-level installation, or `--preview` to inspect the operation without
+writing files:
+
+~~~sh
+npx anchorloop install --platform agents
+npx anchorloop install --global
+npx anchorloop install --preview
+~~~
+
+The npm package itself must be published before `npx anchorloop install` can
+resolve from the public registry. Until that release is available, use the
+standalone Git installation below. npm may keep its own user-level download
+cache; AnchorLoop never writes an npm cache, Python bytecode cache, or workflow
+cache into the project, and those project-local paths are ignored by Git.
+
+## Install the standalone command-line tool
 
 Requirements: Python 3.11 or newer. To install the current project directly
 from its Git repository, without cloning a development checkout:
@@ -104,13 +146,16 @@ On Windows, activate the virtual environment with:
 .venv\Scripts\Activate.ps1
 ~~~
 
-## Install the portable skill adapter
+## Install the portable skill adapter from the standalone CLI
 
 The CLI remains a standalone, agent-neutral product. Its optional skill package
 only tells compatible agents how to consult the CLI and current Anchor state.
 It does not replace the workflow engine or make AnchorLoop Codex-only.
 
-After installing the CLI, preview then install the generic project skill:
+After installing the CLI, preview then install the generic project skill. This
+route keeps `anchor` as the command runner; the npm shortcut above instead
+renders a pinned npx runner for hosts where the Python CLI is not persistently
+installed.
 
 ~~~powershell
 anchor install --project --platform agents
@@ -217,6 +262,17 @@ the tracked diff, staged diff, untracked files, or Git HEAD change before
 verification or close, AnchorLoop returns the task to review and requires a new
 pre-commit run.
 
+Fingerprint entries are length-framed and store a per-file content digest; a
+symlink is recorded as a link target rather than read through to an external
+file.
+
+### Evidence that expires when reality changes
+
+<img src="docs/assets/anchorloop-evidence-integrity.svg" alt="AnchorLoop evidence graph showing brief, plan, and ruleset digests feeding approval, and precommit checks plus a workspace fingerprint gating verification and close. Changed artifacts or workspace state invalidate the next gate." width="100%">
+
+AnchorLoop records evidence, not identity: a changed approved artifact archives
+the approval, while changed checked code requires review and pre-commit again.
+
 DRY, KISS, YAGNI, SOLID, clean-code, and structural checks are evidence-based policies: a finding must point to a concrete location, explain the likely cost, and propose a proportionate alternative. AnchorLoop must not turn those principles into generic style policing.
 
 ## Project state
@@ -258,6 +314,14 @@ Or install the project in editable mode and use:
 ~~~sh
 python3 -m unittest discover -s tests
 anchor help
+~~~
+
+Validate the npm launcher and publishable package contents with Node.js 18 or
+newer:
+
+~~~sh
+npm run test:npm
+npm run pack:check
 ~~~
 
 ## License

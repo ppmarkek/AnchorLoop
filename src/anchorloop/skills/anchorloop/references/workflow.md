@@ -3,14 +3,15 @@
 ## Install this adapter
 
 The Python package keeps the standalone CLI. Install its portable skill adapter
-only when a project or user wants agent discovery:
+only when a project or user wants agent discovery. The installer supplies
+`{{ANCHOR_COMMAND}}` as the command runner in the installed skill:
 
 ~~~powershell
 # Cross-framework project skill (recommended)
-anchor install --project --platform agents --apply
+{{ANCHOR_COMMAND}} install --project --platform agents --apply
 
 # Optional Codex-specific project location
-anchor install --project --platform codex --apply
+{{ANCHOR_COMMAND}} install --project --platform codex --apply
 ~~~
 
 The project option writes only:
@@ -22,7 +23,7 @@ The project option writes only:
 
 The installer copies packaged Markdown and an ownership marker. It does not
 alter `.anchor/`, application code, `AGENTS.md`, hooks, or Graphify settings.
-Use `anchor uninstall --project --platform agents --apply` to remove only
+Use `{{ANCHOR_COMMAND}} uninstall --project --platform agents --apply` to remove only
 unchanged installer-owned files. If a packaged asset was edited locally, the
 installer stops and requires an explicit `--force` before replacing or removing
 it.
@@ -38,6 +39,8 @@ AnchorLoop projects must keep these paths ignored:
 /cache/
 /.cache/
 /.anchor/cache/
+/.npm/
+/.npm-cache/
 graphify-out/
 ~~~
 
@@ -61,7 +64,7 @@ engineer can record a fresh approval.
 
 ## Quality evidence
 
-`anchor precommit` records deterministic checks and a workspace fingerprint.
+`{{ANCHOR_COMMAND}} precommit` records deterministic checks and a workspace fingerprint.
 If the fingerprint differs before verification or close, AnchorLoop resets the
 task to `review_ready`; review the code and run `anchor precommit` again.
 
@@ -70,19 +73,19 @@ task to `review_ready`; review the code and run `anchor precommit` again.
 Record the result first:
 
 ~~~powershell
-anchor verify --by "Engineer name" --result fail --reason "Observed issue"
+{{ANCHOR_COMMAND}} verify --by "Engineer name" --result fail --reason "Observed issue"
 ~~~
 
 Then choose the narrowest valid revision:
 
 ~~~powershell
 # The original approved scope is still valid
-anchor revise --target implement --reason "Fix the observed behaviour"
+{{ANCHOR_COMMAND}} revise --target implement --reason "Fix the observed behaviour"
 
 # The plan or scope decision changed
-anchor revise --target plan --reason "Choose a different approach"
-anchor plan --summary "Revised approach"
-anchor approve --by "Engineer name"
+{{ANCHOR_COMMAND}} revise --target plan --reason "Choose a different approach"
+{{ANCHOR_COMMAND}} plan --summary "Revised approach"
+{{ANCHOR_COMMAND}} approve --by "Engineer name"
 ~~~
 
 ## Rule migration
@@ -93,7 +96,7 @@ govern a new task. Propose and approve a replacement in the same category,
 then migrate it explicitly:
 
 ~~~powershell
-anchor rules supersede <old-rule-id> <new-rule-id> --by "Engineer name" --reason "Migration reason"
+{{ANCHOR_COMMAND}} rules supersede <old-rule-id> <new-rule-id> --by "Engineer name" --reason "Migration reason"
 ~~~
 
 ## Trust boundary

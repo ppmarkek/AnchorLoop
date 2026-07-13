@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -99,12 +101,13 @@ def workspace_fingerprint(root: Path) -> dict[str, Any]:
         return git_fingerprint
 
     digest = hashlib.sha256()
-    digest.update(b"anchorloop-workspace-v1\0filesystem\0")
+    digest.update(b"anchorloop-workspace-v2\0filesystem\0")
     files = sorted(_fingerprint_files(root), key=lambda path: path.relative_to(root).as_posix())
     for path in files:
         _update_digest_with_file(digest, root, path)
     return {
         "algorithm": "sha256",
+        "format_version": 2,
         "digest": f"sha256:{digest.hexdigest()}",
         "source": "filesystem",
         "files": len(files),
@@ -139,7 +142,7 @@ def _git_workspace_fingerprint(root: Path) -> dict[str, Any] | None:
         return None
 
     digest = hashlib.sha256()
-    digest.update(b"anchorloop-workspace-v1\0git\0")
+    digest.update(b"anchorloop-workspace-v2\0git\0")
     _update_digest_value(digest, b"head", head or b"<unborn>")
     _update_digest_value(digest, b"staged", staged)
     _update_digest_value(digest, b"unstaged", unstaged)
@@ -149,12 +152,13 @@ def _git_workspace_fingerprint(root: Path) -> dict[str, Any] | None:
         if not encoded_name:
             continue
         path = root / encoded_name.decode("utf-8", errors="surrogateescape")
-        if path.is_file() and not _is_anchor_owned_path(root, path):
+        if _is_fingerprintable_path(path) and not _is_anchor_owned_path(root, path):
             _update_digest_with_file(digest, root, path)
             untracked_count += 1
 
     return {
         "algorithm": "sha256",
+        "format_version": 2,
         "digest": f"sha256:{digest.hexdigest()}",
         "source": "git",
         "files": untracked_count,
@@ -188,23 +192,82 @@ def _update_digest_value(digest: Any, label: bytes, value: bytes) -> None:
 
 def _update_digest_with_file(digest: Any, root: Path, path: Path) -> None:
     relative_path = path.relative_to(root).as_posix().encode("utf-8", errors="surrogateescape")
-    digest.update(b"file\0")
-    _update_digest_value(digest, b"path", relative_path)
     try:
-        with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
-                digest.update(chunk)
+        metadata = os.lstat(path)
     except OSError:
-        digest.update(b"<unreadable>")
-    digest.update(b"\0")
+        _update_digest_value(digest, b"entry", b"unreadable")
+        _update_digest_value(digest, b"path", relative_path)
+        return
+
+    mode = str(stat.S_IMODE(metadata.st_mode)).encode("ascii")
+    if stat.S_ISLNK(metadata.st_mode):
+        try:
+            target = os.readlink(path).encode("utf-8", errors="surrogateescape")
+        except OSError:
+            target = b"<unreadable>"
+        _update_digest_value(digest, b"entry", b"symlink")
+        _update_digest_value(digest, b"path", relative_path)
+        _update_digest_value(digest, b"mode", mode)
+        _update_digest_value(digest, b"target", target)
+        return
+
+    if not stat.S_ISREG(metadata.st_mode):
+        _update_digest_value(digest, b"entry", b"unsupported")
+        _update_digest_value(digest, b"path", relative_path)
+        _update_digest_value(digest, b"mode", mode)
+        return
+
+    file_digest = hashlib.sha256()
+    size = 0
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise OSError("fingerprint target changed while it was opened")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            while chunk := stream.read(1024 * 1024):
+                size += len(chunk)
+                file_digest.update(chunk)
+    except OSError:
+        _update_digest_value(digest, b"entry", b"unreadable")
+        _update_digest_value(digest, b"path", relative_path)
+        _update_digest_value(digest, b"mode", mode)
+        return
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    _update_digest_value(digest, b"entry", b"file")
+    _update_digest_value(digest, b"path", relative_path)
+    _update_digest_value(digest, b"mode", mode)
+    _update_digest_value(digest, b"size", str(size).encode("ascii"))
+    _update_digest_value(digest, b"content-sha256", file_digest.digest())
 
 
 def _fingerprint_files(root: Path) -> list[Path]:
     return [
         path
         for path in root.rglob("*")
-        if path.is_file() and not any(part in _SKIP_DIRECTORIES for part in path.relative_to(root).parts)
+        if _is_fingerprintable_path(path)
+        and not any(part in _SKIP_DIRECTORIES for part in path.relative_to(root).parts)
     ]
+
+
+def _is_fingerprintable_path(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _is_anchor_owned_path(root: Path, path: Path) -> bool:
@@ -237,13 +300,13 @@ def _git_changed_paths(root: Path) -> list[Path]:
             continue
         for relative_name in process.stdout.splitlines():
             path = root / relative_name
-            if path.is_file():
+            if _is_regular_file(path):
                 paths[path] = None
     return list(paths)
 
 
 def _is_supported_source_file(root: Path, path: Path) -> bool:
-    if not path.is_file() or any(part in _SKIP_DIRECTORIES for part in path.relative_to(root).parts):
+    if not _is_regular_file(path) or any(part in _SKIP_DIRECTORIES for part in path.relative_to(root).parts):
         return False
     return path.suffix.lower() in _TEXT_SUFFIXES or path.name.startswith(".env")
 

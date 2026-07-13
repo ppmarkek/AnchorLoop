@@ -806,8 +806,38 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["install", "--project", "--apply", "--path", str(root)]), 0)
             self.assertTrue((destination / "SKILL.md").is_file())
             self.assertTrue((destination / "references" / "workflow.md").is_file())
+            self.assertIn("anchor status", (destination / "SKILL.md").read_text(encoding="utf-8"))
             marker_path = destination / ".anchorloop-skill.json"
             self.assertTrue(marker_path.is_file())
+
+            codex_destination = quoted_root / ".codex" / "skills" / "anchorloop"
+            self.assertEqual(
+                main(
+                    [
+                        "install",
+                        "--project",
+                        "--platform",
+                        "codex",
+                        "--skill-runtime",
+                        "npx",
+                        "--npx-package",
+                        "anchorloop@0.1.0",
+                        "--apply",
+                        "--path",
+                        str(quoted_root),
+                    ]
+                ),
+                0,
+            )
+            codex_skill = codex_destination / "SKILL.md"
+            self.assertTrue(codex_skill.is_file())
+            self.assertIn(
+                "npx --yes anchorloop@0.1.0 status",
+                codex_skill.read_text(encoding="utf-8"),
+            )
+            codex_marker = json.loads((codex_destination / ".anchorloop-skill.json").read_text())
+            self.assertEqual(codex_marker["runtime"], "npx")
+            self.assertEqual(codex_marker["npx_package"], "anchorloop@0.1.0")
 
             legacy_content = "stale packaged asset\n"
             legacy_asset = destination / "legacy.md"
@@ -839,6 +869,30 @@ class AnchorCliTests(unittest.TestCase):
             self.assertTrue(note.exists())
             self.assertFalse(skill_path.exists())
             self.assertFalse((destination / ".anchorloop-skill.json").exists())
+
+    def test_npx_skill_runtime_requires_a_pinned_package_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            self.assertEqual(
+                main(
+                    [
+                        "install",
+                        "--project",
+                        "--platform",
+                        "codex",
+                        "--skill-runtime",
+                        "npx",
+                        "--npx-package",
+                        "anchorloop@latest",
+                        "--apply",
+                        "--path",
+                        str(root),
+                    ]
+                ),
+                2,
+            )
+            self.assertFalse((root / ".codex" / "skills" / "anchorloop").exists())
 
     def test_doctor_reports_corrupt_state_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

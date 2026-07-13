@@ -10,10 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from .quality import run_precommit, workspace_fingerprint
-
-
-class AnchorError(Exception):
-    """Raised when an Anchor command would break an explicit workflow rule."""
+from .safe_fs import AnchorError, SafeProjectFS
 
 
 TASK_TRANSITIONS = {
@@ -79,6 +76,7 @@ class AnchorProject:
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
+        self.fs = SafeProjectFS(self.root)
         self.anchor_dir = self.root / ".anchor"
 
     @property
@@ -104,7 +102,8 @@ class AnchorProject:
 
     def apply_setup(self, mode: str) -> bool:
         self.preview_setup(mode)
-        created = not self.config_path.exists()
+        self.fs.ensure_directory(self.anchor_dir)
+        created = not self.fs.exists(self.config_path)
 
         directories = (
             "protocol",
@@ -118,7 +117,7 @@ class AnchorProject:
             "logs",
         )
         for directory in directories:
-            (self.anchor_dir / directory).mkdir(parents=True, exist_ok=True)
+            self.fs.ensure_directory(self.anchor_dir / directory)
 
         if created:
             self._write_json(
@@ -154,7 +153,7 @@ class AnchorProject:
             "host_adapters": ["portable-instructions", "terminal", "skills", "slash-commands", "hooks", "mcp"],
         }
         try:
-            current_protocol = self._read_json(protocol_path) if protocol_path.exists() else {}
+            current_protocol = self._read_json(protocol_path) if self.fs.exists(protocol_path) else {}
         except AnchorError:
             current_protocol = {}
         if current_protocol.get("version", 0) < protocol["version"]:
@@ -181,7 +180,7 @@ class AnchorProject:
         for rule_id, category, wording in BASELINE_RULES:
             proposal_path = self._rule_proposal_path(rule_id)
             approved_path = self.anchor_dir / "rules" / "approved" / proposal_path.name
-            if not proposal_path.exists() and not approved_path.exists():
+            if not self.fs.exists(proposal_path) and not self.fs.exists(approved_path):
                 self._write_json(
                     proposal_path,
                     self._rule_document(rule_id, category, wording, source="AnchorLoop baseline"),
@@ -199,24 +198,38 @@ class AnchorProject:
         return created
 
     def require_setup(self) -> None:
-        if not self.config_path.exists():
+        if not self.fs.exists(self.config_path):
             raise AnchorError("Anchor is not configured here. Run: anchor add --apply")
 
     def status(self) -> dict[str, Any]:
         self.require_setup()
         config = self._read_json(self.config_path)
-        task = self._read_json(self.active_task_path) if self.active_task_path.exists() else None
+        task = self._read_json(self.active_task_path) if self.fs.exists(self.active_task_path) else None
         return {
             "project": config["name"],
             "root": str(self.root),
             "ruleset_version": config.get("ruleset_version"),
             "active_task": None if task is None else {"id": task["id"], "title": task["title"], "state": task["state"]},
-            "next_action": self.next_action_path.read_text(encoding="utf-8").strip(),
+            "next_action": self.next_action(),
         }
 
     def doctor(self) -> dict[str, Any]:
         checks: list[dict[str, str]] = []
-        configured = self.config_path.exists()
+        try:
+            configured = self.fs.exists(self.config_path)
+        except AnchorError as error:
+            return {
+                "anchor_configured": False,
+                "active_task": False,
+                "checks": [
+                    {
+                        "name": "filesystem-boundary",
+                        "status": "failed",
+                        "detail": str(error),
+                    }
+                ],
+                "status": "attention",
+            }
         if not configured:
             checks.append(
                 {
@@ -241,7 +254,7 @@ class AnchorProject:
             except AnchorError as error:
                 checks.append({"name": "config", "status": "failed", "detail": str(error)})
 
-        if self.active_task_path.exists():
+        if self.fs.exists(self.active_task_path):
             try:
                 task = self._read_json(self.active_task_path)
                 state = task.get("state")
@@ -261,7 +274,7 @@ class AnchorProject:
             checks.append({"name": "active-task", "status": "not-run", "detail": "no active task"})
 
         active_rules = self.anchor_dir / "rules" / "active.json"
-        if active_rules.exists():
+        if self.fs.exists(active_rules):
             try:
                 rules = self._read_json(active_rules).get("rules", {})
                 if not isinstance(rules, dict):
@@ -269,7 +282,7 @@ class AnchorProject:
                 missing = [
                     rule_id
                     for rule_id in rules.values()
-                    if not self._rule_approved_path(str(rule_id)).exists()
+                    if not self.fs.exists(self._rule_approved_path(str(rule_id)))
                 ]
                 if missing:
                     checks.append(
@@ -289,14 +302,14 @@ class AnchorProject:
 
         return {
             "anchor_configured": configured,
-            "active_task": self.active_task_path.exists(),
+            "active_task": self.fs.exists(self.active_task_path),
             "checks": checks,
             "status": "ok" if all(check["status"] != "failed" for check in checks) else "attention",
         }
 
     def start_task(self, title: str) -> dict[str, Any]:
         self.require_setup()
-        if self.active_task_path.exists():
+        if self.fs.exists(self.active_task_path):
             task = self._read_json(self.active_task_path)
             raise AnchorError(f"Task {task['id']} is already active in state {task['state']}.")
         normalized_title = title.strip()
@@ -335,7 +348,11 @@ class AnchorProject:
         if missing:
             raise AnchorError(f"Engineer brief is incomplete: {', '.join(missing)}.")
         task["brief"] = {name: value.strip() for name, value in values.items()}
-        task["brief_record"] = {"by": engineer, "at": self._timestamp()}
+        task["brief_record"] = {
+            "by": engineer,
+            "at": self._timestamp(),
+            "brief_digest": self._document_digest(task["brief"]),
+        }
         self._append_task_event(task, "task.brief.recorded")
         self._write_json(self.active_task_path, task)
         self._write_next_action("Brief recorded. Prepare a concrete plan, then run: anchor plan --summary <text>\n")
@@ -343,7 +360,12 @@ class AnchorProject:
 
     def plan_task(self, summary: str) -> dict[str, Any]:
         task = self._task_in_states({"briefing", "planned"}, "plan")
-        if any(not value for value in task["brief"].values()) or "brief_record" not in task:
+        brief_record = task.get("brief_record")
+        if (
+            any(not value for value in task["brief"].values())
+            or not isinstance(brief_record, dict)
+            or brief_record.get("brief_digest") != self._document_digest(task["brief"])
+        ):
             raise AnchorError("Record the complete engineer brief before planning.")
         if "plan" in task:
             task.setdefault("plan_history", []).append(task["plan"])
@@ -393,14 +415,15 @@ class AnchorProject:
             self._append_task_event(task, "task.verify.failed")
             self._write_json(self.active_task_path, task)
             self._write_next_action(
-                "Verification failed. Return to the smallest valid revision with: "
-                "anchor revise --target implement|plan --reason <text>\n"
+                "Verification failed. Return to the smallest valid revision with one of:\n"
+                "anchor revise --target implement --reason <text>\n"
+                "anchor revise --target plan --reason <text>\n"
             )
             return task
         return self._advance_task(task, "verify", "verified")
 
     def revise_task(self, *, target: str, reason: str) -> dict[str, Any]:
-        task = self._task_in_state("quality_checked", "revise")
+        task = self._task_in_states({"implementing", "review_ready", "quality_checked"}, "revise")
         self._ensure_approval_matches_task(task)
         normalized_reason = self._required_text(reason, "Revision reason")
         if target not in {"implement", "plan"}:
@@ -436,7 +459,7 @@ class AnchorProject:
 
     def transition(self, action: str) -> dict[str, Any]:
         self.require_setup()
-        if not self.active_task_path.exists():
+        if not self.fs.exists(self.active_task_path):
             raise AnchorError("No active task. Run: anchor start \"short task title\"")
         task = self._read_json(self.active_task_path)
         state = task["state"]
@@ -457,7 +480,7 @@ class AnchorProject:
         if action == "close":
             closed_path = self.anchor_dir / "tasks" / "closed" / f"{task['id']}.json"
             self._write_json(closed_path, task)
-            self.active_task_path.unlink()
+            self.fs.unlink(self.active_task_path)
             self._write_next_action("No active task. Start the next one with: anchor start \"short task title\"\n")
             return task
         self._write_json(self.active_task_path, task)
@@ -466,7 +489,7 @@ class AnchorProject:
 
     def precommit(self) -> dict[str, Any]:
         self.require_setup()
-        if not self.active_task_path.exists():
+        if not self.fs.exists(self.active_task_path):
             raise AnchorError("No active task. Run: anchor start \"short task title\"")
         task = self._read_json(self.active_task_path)
         if task["state"] != "review_ready":
@@ -504,7 +527,7 @@ class AnchorProject:
     ) -> dict[str, Any]:
         self.require_setup()
         proposal_path = self._rule_proposal_path(rule_id)
-        if not proposal_path.exists():
+        if not self.fs.exists(proposal_path):
             raise AnchorError(f"Rule proposal '{rule_id}' does not exist.")
         rule = self._read_json(proposal_path)
         self._validate_rule_document(rule, expected_id=rule_id, expected_status="proposed")
@@ -523,7 +546,7 @@ class AnchorProject:
         config = self._read_json(self.config_path)
         self._refresh_config_ruleset_metadata(config)
         self._write_json(self.config_path, config)
-        proposal_path.unlink()
+        self.fs.unlink(proposal_path)
         self._append_event({"type": "rule.approved", "rule_id": rule_id, "at": self._timestamp()})
         return rule
 
@@ -540,9 +563,11 @@ class AnchorProject:
         self.require_setup()
         self._validate_rule_id(old_rule_id)
         self._validate_rule_id(new_rule_id)
+        if old_rule_id == new_rule_id:
+            raise AnchorError("A rule cannot supersede itself.")
         old_rule_path = self._rule_approved_path(old_rule_id)
         new_rule_path = self._rule_approved_path(new_rule_id)
-        if not old_rule_path.exists() or not new_rule_path.exists():
+        if not self.fs.exists(old_rule_path) or not self.fs.exists(new_rule_path):
             raise AnchorError("Both rules must be approved before one can supersede the other.")
         old_rule = self._read_json(old_rule_path)
         new_rule = self._read_json(new_rule_path)
@@ -553,11 +578,13 @@ class AnchorProject:
             require_approval_digest=False,
         )
         self._validate_rule_document(new_rule, expected_id=new_rule_id, expected_status="approved")
+        if new_rule.get("superseded_by"):
+            raise AnchorError("A superseded rule cannot become active again through implicit supersession.")
         if old_rule["category"] != new_rule["category"]:
             raise AnchorError("Only rules in the same category can supersede each other.")
 
         active_path = self.anchor_dir / "rules" / "active.json"
-        active = self._read_json(active_path) if active_path.exists() else {"version": 1, "rules": {}}
+        active = self._read_json(active_path) if self.fs.exists(active_path) else {"version": 1, "rules": {}}
         category = old_rule["category"]
         if active["rules"].get(category) != old_rule_id:
             raise AnchorError(f"Rule '{old_rule_id}' is not the active {category} rule.")
@@ -586,11 +613,11 @@ class AnchorProject:
     def list_rules(self) -> list[dict[str, Any]]:
         self.require_setup()
         rules = []
-        for path in sorted((self.anchor_dir / "rules" / "proposals").glob("*.json")):
+        for path in sorted(self.fs.glob(self.anchor_dir / "rules" / "proposals", "*.json")):
             rule = self._read_json(path)
             rule["location"] = "proposal"
             rules.append(rule)
-        for path in sorted((self.anchor_dir / "rules" / "approved").glob("*.json")):
+        for path in sorted(self.fs.glob(self.anchor_dir / "rules" / "approved", "*.json")):
             rule = self._read_json(path)
             rule["location"] = "approved"
             rules.append(rule)
@@ -620,7 +647,7 @@ class AnchorProject:
 
     def agent_status(self) -> dict[str, Any]:
         result = self.detect_agent_capabilities()
-        adapters = sorted((self.anchor_dir / "agents" / "adapters").glob("*.json"))
+        adapters = sorted(self.fs.glob(self.anchor_dir / "agents" / "adapters", "*.json"))
         result["active_adapters"] = [path.stem for path in adapters]
         return result
 
@@ -662,7 +689,7 @@ class AnchorProject:
 
     def _active_rules_with(self, rule: dict[str, Any]) -> dict[str, Any]:
         path = self.anchor_dir / "rules" / "active.json"
-        active = self._read_json(path) if path.exists() else {"version": 1, "rules": {}}
+        active = self._read_json(path) if self.fs.exists(path) else {"version": 1, "rules": {}}
         existing = active["rules"].get(rule["category"])
         if not existing:
             active["rules"][rule["category"]] = rule["id"]
@@ -670,15 +697,17 @@ class AnchorProject:
 
     def _active_rules_snapshot(self) -> dict[str, Any]:
         path = self.anchor_dir / "rules" / "active.json"
-        active = self._read_json(path) if path.exists() else {"version": 1, "rules": {}}
+        active = self._read_json(path) if self.fs.exists(path) else {"version": 1, "rules": {}}
         rules = dict(active["rules"])
         documents = {}
         for category, rule_id in sorted(rules.items()):
             approved_path = self._rule_approved_path(rule_id)
-            if not approved_path.exists():
+            if not self.fs.exists(approved_path):
                 raise AnchorError(f"Active rule '{rule_id}' is missing its approved document.")
             rule = self._read_json(approved_path)
             self._validate_rule_document(rule, expected_id=rule_id, expected_status="approved")
+            if rule.get("superseded_by"):
+                raise AnchorError(f"Active rule '{rule_id}' is marked as superseded.")
             documents[category] = {
                 "id": rule["id"],
                 "version": rule["version"],
@@ -709,7 +738,7 @@ class AnchorProject:
         return f"ruleset-{hashlib.sha256(encoded).hexdigest()[:12]}"
 
     def _next_action_for_existing_project(self) -> str:
-        if self.active_task_path.exists():
+        if self.fs.exists(self.active_task_path):
             task = self._read_json(self.active_task_path)
             return f"Existing task: {task['title']} ({task['state']}).\n{NEXT_ACTIONS[task['state']]}\n"
         return "Anchor is already configured. Start a task with: anchor start \"short task title\"\n"
@@ -719,7 +748,7 @@ class AnchorProject:
 
     def _task_in_states(self, states: set[str], action: str) -> dict[str, Any]:
         self.require_setup()
-        if not self.active_task_path.exists():
+        if not self.fs.exists(self.active_task_path):
             raise AnchorError("No active task. Run: anchor start \"short task title\"")
         task = self._read_json(self.active_task_path)
         if task["state"] not in states:
@@ -768,8 +797,8 @@ class AnchorProject:
 
     def _rule_path(self, location: str, rule_id: str) -> Path:
         self._validate_rule_id(rule_id)
-        base = (self.anchor_dir / "rules" / location).resolve()
-        candidate = (base / f"{rule_id}.json").resolve()
+        base = self.fs.path(".anchor", "rules", location)
+        candidate = self.fs.path(".anchor", "rules", location, f"{rule_id}.json")
         if candidate.parent != base:
             raise AnchorError("Rule path escapes the expected rules directory.")
         return candidate
@@ -821,9 +850,7 @@ class AnchorProject:
 
     def _append_event(self, event: dict[str, Any]) -> None:
         path = self.anchor_dir / "events.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, sort_keys=True) + "\n")
+        self.fs.append_text(path, json.dumps(event, sort_keys=True) + "\n")
 
     def _ensure_graphify_ignore(self) -> None:
         path = self.root / ".graphifyignore"
@@ -838,7 +865,7 @@ class AnchorProject:
             "dist/",
             "build/",
         ]
-        current = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        current = self.fs.read_text(path).splitlines() if self.fs.exists(path) else []
         additions = [line for line in required_lines if line not in current]
         if additions:
             prefix = "\n" if current else ""
@@ -846,6 +873,9 @@ class AnchorProject:
 
     def _write_next_action(self, content: str) -> None:
         self._write_text(self.next_action_path, content)
+
+    def next_action(self) -> str:
+        return self.fs.read_text(self.next_action_path).strip()
 
     @staticmethod
     def _timestamp() -> str:
@@ -855,11 +885,10 @@ class AnchorProject:
     def _slug(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
-    @staticmethod
-    def _read_json(path: Path) -> dict[str, Any]:
+    def _read_json(self, path: Path) -> dict[str, Any]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError) as error:
+            data = json.loads(self.fs.read_text(path))
+        except (AnchorError, UnicodeDecodeError) as error:
             raise AnchorError(f"Cannot read Anchor state at {path}.") from error
         except json.JSONDecodeError as error:
             raise AnchorError(f"Anchor state is invalid JSON at {path}. Run: anchor doctor") from error
@@ -867,26 +896,19 @@ class AnchorProject:
             raise AnchorError(f"Anchor state at {path} must be a JSON object. Run: anchor doctor")
         return data
 
-    @staticmethod
-    def _write_json(path: Path, data: dict[str, Any]) -> None:
-        AnchorProject._write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    def _write_json(self, path: Path, data: dict[str, Any]) -> None:
+        self._write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
-    @staticmethod
-    def _write_json_if_missing(path: Path, data: dict[str, Any]) -> None:
-        if not path.exists():
-            AnchorProject._write_json(path, data)
+    def _write_json_if_missing(self, path: Path, data: dict[str, Any]) -> None:
+        if not self.fs.exists(path):
+            self._write_json(path, data)
 
-    @staticmethod
-    def _write_text(path: Path, content: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.tmp")
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
+    def _write_text(self, path: Path, content: str) -> None:
+        self.fs.atomic_write_text(path, content)
 
-    @staticmethod
-    def _write_text_if_missing(path: Path, content: str) -> None:
-        if not path.exists():
-            AnchorProject._write_text(path, content)
+    def _write_text_if_missing(self, path: Path, content: str) -> None:
+        if not self.fs.exists(path):
+            self._write_text(path, content)
 
     @staticmethod
     def _required_text(value: str, label: str) -> str:
@@ -903,7 +925,10 @@ class AnchorProject:
     @staticmethod
     def _task_approval_subject(task: dict[str, Any]) -> dict[str, Any]:
         return {
+            "task_id": task.get("id"),
+            "title": task.get("title"),
             "brief": task.get("brief"),
+            "brief_record": task.get("brief_record"),
             "plan": task.get("plan"),
             "ruleset": task.get("ruleset"),
         }
@@ -911,6 +936,7 @@ class AnchorProject:
     def _task_approval_digests(self, subject: dict[str, Any]) -> dict[str, str]:
         return {
             "brief_digest": self._document_digest(subject["brief"]),
+            "brief_record_digest": self._document_digest(subject["brief_record"]),
             "plan_digest": self._document_digest(subject["plan"]),
             "ruleset_digest": self._document_digest(subject["ruleset"]),
             "task_digest": self._document_digest(subject),
@@ -934,7 +960,7 @@ class AnchorProject:
         if not changed:
             return
 
-        if "brief" in changed:
+        if "brief" in changed or "brief_record" in changed:
             state = "briefing"
             next_action = "The approved brief changed. Record the brief again, then create and approve a plan."
         else:
@@ -952,6 +978,7 @@ class AnchorProject:
             task.pop(field, None)
         if state == "briefing":
             invalidation["plan"] = task.pop("plan", None)
+            invalidation["brief_record"] = task.pop("brief_record", None)
         task["state"] = state
         self._append_task_event(task, "task.approval.invalidated")
         self._write_json(self.active_task_path, task)

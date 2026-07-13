@@ -70,8 +70,62 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Could not install the built wheel." }
           & $anchor install --project --platform agents --path $project --apply
           if ($LASTEXITCODE -ne 0) { throw "The installed anchor CLI could not install its skill." }
+          & $anchor install --project --platform codex --path $project --apply
+          if ($LASTEXITCODE -ne 0) { throw "The installed anchor CLI could not install its Codex skill." }
 
           $skill = Join-Path $project ".agents/skills/anchorloop/SKILL.md"
           $workflow = Join-Path $project ".agents/skills/anchorloop/references/workflow.md"
+          $codexSkill = Join-Path $project ".codex/skills/anchorloop/SKILL.md"
           if (-not (Test-Path $skill)) { throw "The installed wheel did not provide SKILL.md." }
           if (-not (Test-Path $workflow)) { throw "The installed wheel did not provide workflow.md." }
+          if (-not (Test-Path $codexSkill)) { throw "The installed wheel did not provide the Codex SKILL.md." }
+
+  npm-runner:
+    name: npm runner (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: npm test
+      - run: npm run pack:check
+      - name: Smoke-test the packed npx launcher
+        shell: pwsh
+        run: |
+          $workspace = Join-Path $env:RUNNER_TEMP "anchorloop-npx-smoke"
+          $packageDirectory = Join-Path $workspace "package"
+          $project = Join-Path $workspace "project"
+          $cache = Join-Path $workspace "npm-cache"
+          $npx = if ($IsWindows) { "npx.cmd" } else { "npx" }
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+
+          Remove-Item -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $packageDirectory, $project | Out-Null
+          $env:npm_config_cache = $cache
+          try {
+            $archive = (npm pack --pack-destination $packageDirectory --json | ConvertFrom-Json)[0]
+            $tarball = Join-Path $packageDirectory $archive.filename
+            Push-Location -LiteralPath $project
+            try {
+              & $npx --yes "--package=$tarball" anchorloop install
+              if ($LASTEXITCODE -ne 0) { throw "The packed npx launcher could not install the Codex skill." }
+            } finally {
+              Pop-Location
+            }
+
+            $skill = Join-Path $project ".codex/skills/anchorloop/SKILL.md"
+            if (-not (Test-Path -LiteralPath $skill)) { throw "The npx launcher did not create SKILL.md." }
+            if (-not (Select-String -LiteralPath $skill -SimpleMatch "npx --yes anchorloop@$version status" -Quiet)) {
+              throw "The installed skill did not retain its pinned npx runner."
+            }
+          } finally {
+            Remove-Item -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue
+          }

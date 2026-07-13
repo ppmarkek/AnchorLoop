@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .project import AnchorError, AnchorProject, TASK_TRANSITIONS
-from .skill_install import SUPPORTED_PLATFORMS, SkillInstaller
+from .skill_install import SUPPORTED_PLATFORMS, SUPPORTED_SKILL_RUNTIMES, SkillInstaller
 
 
 def _path_argument(parser: argparse.ArgumentParser) -> None:
@@ -117,6 +117,14 @@ def build_parser() -> argparse.ArgumentParser:
                 else "Remove modified skill assets owned by the installer"
             ),
         )
+        if name == "install":
+            command.add_argument(
+                "--skill-runtime",
+                choices=SUPPORTED_SKILL_RUNTIMES,
+                default="anchor",
+                help=argparse.SUPPRESS,
+            )
+            command.add_argument("--npx-package", help=argparse.SUPPRESS)
         _path_argument(command)
 
     agent = commands.add_parser("agent", help="Inspect host-agent integration capabilities")
@@ -153,7 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if created
                 else "Anchor was already configured; generated support files were checked."
             )
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
 
         if args.command == "help":
@@ -168,7 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "start":
             task = project.start_task(args.title)
             print(f"Started {task['id']}: {task['title']} (briefing)")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "brief":
             task = project.record_brief(
@@ -182,12 +190,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
             )
             print(f"Engineer brief recorded for {task['id']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "plan":
             task = project.plan_task(args.summary)
             print(f"Task {task['id']} is now {task['state']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "approve":
             provenance, interactive_confirmed = _approval_capture(args.provenance)
@@ -197,12 +205,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interactive_confirmed=interactive_confirmed,
             )
             print(f"Task {task['id']} is now {task['state']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "precommit":
             task = project.precommit()
             print(f"Task {task['id']} is now {task['state']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "verify":
             provenance, interactive_confirmed = _approval_capture(args.provenance)
@@ -214,17 +222,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interactive_confirmed=interactive_confirmed,
             )
             print(f"Task {task['id']} is now {task['state']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "revise":
             task = project.revise_task(target=args.target, reason=args.reason)
             print(f"Task {task['id']} is now {task['state']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command in TASK_TRANSITIONS:
             task = project.transition(args.command)
             print(f"Task {task['id']} is now {task['state']}.")
-            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            print(project.next_action())
             return 0
         if args.command == "rules":
             return _run_rules(project, args)
@@ -244,7 +252,10 @@ def _run_rules(project: AnchorProject, args: argparse.Namespace) -> int:
         return 0
     if args.rule_command == "propose":
         rule = project.propose_rule(args.category, args.wording)
-        print(f"Proposed {rule['id']}. It is inactive until an engineer runs: anchor rules approve {rule['id']}")
+        print(
+            f"Proposed {rule['id']}. It is inactive until an engineer runs: "
+            f"anchor rules approve {rule['id']} --by <engineer>"
+        )
         return 0
     if args.rule_command == "approve":
         provenance, interactive_confirmed = _approval_capture(args.provenance)
@@ -274,7 +285,14 @@ def _run_rules(project: AnchorProject, args: argparse.Namespace) -> int:
 def _run_skill_install(args: argparse.Namespace, root: Path) -> int:
     installer = SkillInstaller(root)
     if args.command == "install":
-        preview = installer.preview_install(platform=args.platform, project_scoped=args.project)
+        runtime = args.skill_runtime
+        npx_package = args.npx_package
+        preview = installer.preview_install(
+            platform=args.platform,
+            project_scoped=args.project,
+            runtime=runtime,
+            npx_package=npx_package,
+        )
         if not args.apply:
             print("\n".join(preview.lines()))
             print(_skill_apply_instruction(args, root))
@@ -282,6 +300,8 @@ def _run_skill_install(args: argparse.Namespace, root: Path) -> int:
         installation = installer.install(
             platform=args.platform,
             project_scoped=args.project,
+            runtime=runtime,
+            npx_package=npx_package,
             force=args.force,
         )
         print(
@@ -326,6 +346,8 @@ def _skill_apply_command(args: argparse.Namespace) -> str:
     if args.project:
         parts.append("--project")
     parts.extend(["--platform", args.platform, "--apply"])
+    if args.command == "install" and args.skill_runtime != "anchor":
+        parts.extend(["--skill-runtime", args.skill_runtime, "--npx-package", args.npx_package])
     if args.force:
         parts.append("--force")
     return " ".join(parts)

@@ -6,8 +6,26 @@ engine and it never becomes the source of truth for task state.
 
 ## Install
 
-Install the Python package first, then explicitly apply a previewed skill
-installation:
+For a Codex project with Node.js 18+ and Python 3.11+, the npm shortcut is the
+fastest route:
+
+~~~powershell
+npx anchorloop install
+~~~
+
+It installs `.codex/skills/anchorloop/` and renders the skill with a pinned
+`npx --yes anchorloop@<version>` runner. The runner packages the Python source,
+so it can execute later AnchorLoop commands without a globally installed
+`anchor` executable. It never writes `node_modules`, a Python bytecode cache,
+or a workflow cache into the project. The package must be published to npm
+before this public shortcut can resolve.
+
+For a project-scoped installation, AnchorLoop rejects symlink and Windows
+reparse-point components in `.codex/`, `.agents/`, `skills/`, and the skill
+directory. `--force` can replace only AnchorLoop-owned assets; it never relaxes
+this filesystem boundary.
+
+For the standalone Python CLI, explicitly apply a previewed skill installation:
 
 ~~~powershell
 # Cross-framework Agent Skills location (recommended)
@@ -28,10 +46,11 @@ references/workflow.md
 .anchorloop-skill.json
 ~~~
 
-The marker stores a SHA-256 digest for every installed asset. By default,
-install and uninstall stop if an installer-owned file was edited locally; this
-preserves local work and prevents broad deletion. Use `--force` only when
-those edits are intentionally being replaced or removed.
+The marker stores a SHA-256 digest for every installed asset and records the
+chosen command runner. By default, install and uninstall stop if an
+installer-owned file was edited locally; this preserves local work and prevents
+broad deletion. Use `--force` only when those edits are intentionally being
+replaced or removed.
 
 Uninstall removes only unchanged installer-owned files:
 
@@ -60,7 +79,8 @@ approve a replacement in the same category, then record an explicit
 
 ## Workflow contract
 
-The installed skill directs an agent to run `anchor status` and read
+The installed skill directs an agent to run the installer-rendered command
+runner (either `anchor` or a pinned npx command) for `status`, then read
 `.anchor/next-action.md`. It must not edit state JSON directly or act as the
 engineer at approval, rule, verification, or close gates.
 

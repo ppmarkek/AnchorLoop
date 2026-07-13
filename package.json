@@ -1,0 +1,39 @@
+{
+  "name": "anchorloop",
+  "version": "0.1.0",
+  "description": "Engineer-controlled, agent-neutral workflow for AI-assisted software delivery.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ppmarkek/AnchorLoop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ppmarkek/AnchorLoop/issues"
+  },
+  "homepage": "https://github.com/ppmarkek/AnchorLoop#readme",
+  "bin": {
+    "anchorloop": "npm/bin/anchorloop.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "npm/bin/anchorloop.js",
+    "src/anchorloop/__init__.py",
+    "src/anchorloop/cli.py",
+    "src/anchorloop/project.py",
+    "src/anchorloop/quality.py",
+    "src/anchorloop/safe_fs.py",
+    "src/anchorloop/skill_install.py",
+    "src/anchorloop/skills/",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "docs/assets/"
+  ],
+  "scripts": {
+    "test": "npm run test:npm",
+    "test:npm": "node --test npm/test/*.test.js",
+    "pack:check": "npm pack --dry-run"
+  }
+}
