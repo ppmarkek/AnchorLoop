@@ -170,7 +170,8 @@ Anchor manages third-party and project skills. It can document but cannot disabl
 | `/anchor rules list` | Show active, proposed, rejected, and retired rules with version and approval evidence. |
 | `/anchor rules propose <category> "rule"` | Create a reviewable quality, security, or structure-rule proposal; it has no effect. |
 | `/anchor rules inspect <id>` | Show exact wording, scope, rationale, examples, affected checks, and differences from the active version. |
-| `/anchor rules approve <id>` | Activate one exact proposed version after the engineer reviews it. |
+| `/anchor rules approve <id> --by <engineer>` | Approve one exact proposed version with recorded provenance. It becomes active only when its category has no active rule. |
+| `/anchor rules supersede <old> <new> --by <engineer> --reason <text>` | Replace an active rule explicitly while preserving the approval and replacement history. |
 | `/anchor rules reject <id>` / `retire <id>` | Preserve the decision and reason without silently deleting history. |
 | `/anchor structure show` | Show the active structure policy and current compliance summary. |
 | `/anchor structure propose "outcome"` | Map current impact with Graphify and propose a structural change without editing files. |
@@ -446,7 +447,7 @@ A paused task stores its prior state. A transition that changes source files is 
   cache/                          # ignored
   logs/                           # ignored
 
-.agents/skills/graphify/          # project Graphify skill
+.agents/skills/graphify/          # optional upstream Graphify skill, installed separately
 .graphifyignore                   # source-index exclusions
 graphify-out/                     # Graphify artefact; commit policy chosen in setup
 ~~~
@@ -496,21 +497,30 @@ The CLI validates every write and preserves an append-only transition event log.
 
 ## 12. Graphify adapter
 
-Graphify is the first navigation provider, not a replacement for source control or tests. Anchor calls its CLI from the agent-neutral core and uses a host-specific Graphify skill only when the host supports skills. Its upstream project supports project-scoped agent installation, `graphify-out/`, `.graphifyignore`, and incremental updates. See [Graphify](https://github.com/Graphify-Labs/graphify).
+Graphify is the first planned navigation provider, not a replacement for source
+control or tests. The current AnchorLoop core records opt-in integration
+metadata and maintains `.graphifyignore`; it does not install, configure, or
+invoke Graphify. Its upstream project supports project-scoped agent
+installation, `graphify-out/`, and incremental updates. See
+[Graphify](https://github.com/Graphify-Labs/graphify).
 
-### 12.1 Setup
+### 12.1 Current setup boundary
 
 Before changing anything, `init` and `add` show:
 
 ~~~
-Will create: .anchor/, .graphifyignore, Graphify integration configuration.
-Will install: Graphify CLI and project-scoped Graphify skill.
-Will index: source code only; generated and private Anchor files are excluded.
-Will not modify: application source code or application dependencies.
-Approval required: /anchor approve setup
+Will create: .anchor/, .graphifyignore, portable protocol, and Graphify integration metadata.
+Will not: install Graphify, register any Graphify skill, build a graph, or modify application dependencies.
 ~~~
 
-After approval Anchor records the upstream Graphify version, creates ignore rules, registers the project skill, and builds a code-only map. Semantic document/media extraction is opt-in because it can consume model/API capacity.
+AnchorLoop records Graphify as an optional integration. An engineer must
+separately choose the upstream Graphify installation, skill scope, backend, and
+whether to build a code-only or semantic map. This keeps Graphify's
+dependencies and model/API requirements outside AnchorLoop's local core.
+
+AnchorLoop's own portable skill follows the same distribution shape without
+changing this boundary: `anchor install --project --platform agents --apply`
+installs only the thin AnchorLoop adapter in `.agents/skills/anchorloop/`.
 
 ### 12.2 Locate algorithm
 

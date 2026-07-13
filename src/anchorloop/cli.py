@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .project import AnchorError, AnchorProject, TASK_TRANSITIONS
+from .skill_install import SUPPORTED_PLATFORMS, SkillInstaller
 
 
 def _path_argument(parser: argparse.ArgumentParser) -> None:
@@ -28,16 +29,42 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--apply", action="store_true", help="Apply the shown setup plan")
 
     workflow_commands: dict[str, argparse.ArgumentParser] = {}
-    for name in ("help", "status", "doctor", "plan", "approve", "implement", "review", "precommit", "verify", "close"):
+    for name in (
+        "help",
+        "status",
+        "doctor",
+        "plan",
+        "approve",
+        "implement",
+        "review",
+        "precommit",
+        "verify",
+        "revise",
+        "close",
+    ):
         command = commands.add_parser(name)
         _path_argument(command)
         workflow_commands[name] = command
 
     workflow_commands["plan"].add_argument("--summary", required=True, help="Concrete plan prepared for engineer approval")
     workflow_commands["approve"].add_argument("--by", required=True, help="Engineer approving the recorded plan")
+    workflow_commands["approve"].add_argument(
+        "--provenance",
+        choices=("audit", "interactive-tty"),
+        default="audit",
+        help="How the approval was captured; audit is not an authentication boundary",
+    )
     workflow_commands["verify"].add_argument("--by", required=True, help="Engineer who performed manual verification")
     workflow_commands["verify"].add_argument("--result", required=True, choices=("pass", "fail", "partial", "not-applicable"))
     workflow_commands["verify"].add_argument("--reason", required=True, help="Observed verification outcome or accepted limitation")
+    workflow_commands["verify"].add_argument(
+        "--provenance",
+        choices=("audit", "interactive-tty"),
+        default="audit",
+        help="How the verification was captured; audit is not an authentication boundary",
+    )
+    workflow_commands["revise"].add_argument("--target", required=True, choices=("implement", "plan"))
+    workflow_commands["revise"].add_argument("--reason", required=True)
 
     start = commands.add_parser("start", help="Create an engineer-owned task")
     start.add_argument("title")
@@ -62,7 +89,35 @@ def build_parser() -> argparse.ArgumentParser:
     _path_argument(rule_propose)
     rule_approve = rule_commands.add_parser("approve")
     rule_approve.add_argument("rule_id")
+    rule_approve.add_argument("--by", required=True, help="Engineer approving the exact rule document")
+    rule_approve.add_argument("--provenance", choices=("audit", "interactive-tty"), default="audit")
     _path_argument(rule_approve)
+    rule_supersede = rule_commands.add_parser("supersede")
+    rule_supersede.add_argument("old_rule_id")
+    rule_supersede.add_argument("new_rule_id")
+    rule_supersede.add_argument("--by", required=True, help="Engineer authorizing the replacement")
+    rule_supersede.add_argument("--reason", required=True)
+    rule_supersede.add_argument("--provenance", choices=("audit", "interactive-tty"), default="audit")
+    _path_argument(rule_supersede)
+
+    for name in ("install", "uninstall"):
+        command = commands.add_parser(
+            name,
+            help=f"Preview or {name} the portable AnchorLoop skill adapter",
+        )
+        command.add_argument("--project", action="store_true", help="Use the current project's skill directory")
+        command.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="agents")
+        command.add_argument("--apply", action="store_true", help=f"Apply the shown {name} operation")
+        command.add_argument(
+            "--force",
+            action="store_true",
+            help=(
+                "Allow overwriting or removing modified skill assets"
+                if name == "install"
+                else "Remove modified skill assets owned by the installer"
+            ),
+        )
+        _path_argument(command)
 
     agent = commands.add_parser("agent", help="Inspect host-agent integration capabilities")
     agent_commands = agent.add_subparsers(dest="agent_command", required=True)
@@ -85,13 +140,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     project = AnchorProject.at(root)
 
     try:
+        if args.command in {"install", "uninstall"}:
+            return _run_skill_install(args, root)
         if args.command in {"init", "add"}:
             preview = project.preview_setup(args.command)
             if not args.apply:
                 print("\n".join(preview.lines()))
                 return 0
             created = project.apply_setup(args.command)
-            print("Anchor is ready." if created else "Anchor was already configured; no state was replaced.")
+            print(
+                "Anchor is ready."
+                if created
+                else "Anchor was already configured; generated support files were checked."
+            )
             print(project.next_action_path.read_text(encoding="utf-8").strip())
             return 0
 
@@ -129,7 +190,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(project.next_action_path.read_text(encoding="utf-8").strip())
             return 0
         if args.command == "approve":
-            task = project.approve_task(args.by)
+            provenance, interactive_confirmed = _approval_capture(args.provenance)
+            task = project.approve_task(
+                args.by,
+                provenance=provenance,
+                interactive_confirmed=interactive_confirmed,
+            )
             print(f"Task {task['id']} is now {task['state']}.")
             print(project.next_action_path.read_text(encoding="utf-8").strip())
             return 0
@@ -139,7 +205,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(project.next_action_path.read_text(encoding="utf-8").strip())
             return 0
         if args.command == "verify":
-            task = project.verify_task(by=args.by, result=args.result, reason=args.reason)
+            provenance, interactive_confirmed = _approval_capture(args.provenance)
+            task = project.verify_task(
+                by=args.by,
+                result=args.result,
+                reason=args.reason,
+                provenance=provenance,
+                interactive_confirmed=interactive_confirmed,
+            )
+            print(f"Task {task['id']} is now {task['state']}.")
+            print(project.next_action_path.read_text(encoding="utf-8").strip())
+            return 0
+        if args.command == "revise":
+            task = project.revise_task(target=args.target, reason=args.reason)
             print(f"Task {task['id']} is now {task['state']}.")
             print(project.next_action_path.read_text(encoding="utf-8").strip())
             return 0
@@ -169,10 +247,95 @@ def _run_rules(project: AnchorProject, args: argparse.Namespace) -> int:
         print(f"Proposed {rule['id']}. It is inactive until an engineer runs: anchor rules approve {rule['id']}")
         return 0
     if args.rule_command == "approve":
-        rule = project.approve_rule(args.rule_id)
+        provenance, interactive_confirmed = _approval_capture(args.provenance)
+        rule = project.approve_rule(
+            args.rule_id,
+            by=args.by,
+            provenance=provenance,
+            interactive_confirmed=interactive_confirmed,
+        )
         print(f"Approved {rule['id']} version {rule['version']}.")
         return 0
+    if args.rule_command == "supersede":
+        provenance, interactive_confirmed = _approval_capture(args.provenance)
+        result = project.supersede_rule(
+            old_rule_id=args.old_rule_id,
+            new_rule_id=args.new_rule_id,
+            by=args.by,
+            reason=args.reason,
+            provenance=provenance,
+            interactive_confirmed=interactive_confirmed,
+        )
+        print(f"Active {result['category']} rule is now {result['active_rule']}.")
+        return 0
     return 1
+
+
+def _run_skill_install(args: argparse.Namespace, root: Path) -> int:
+    installer = SkillInstaller(root)
+    if args.command == "install":
+        preview = installer.preview_install(platform=args.platform, project_scoped=args.project)
+        if not args.apply:
+            print("\n".join(preview.lines()))
+            print(_skill_apply_instruction(args, root))
+            return 0
+        installation = installer.install(
+            platform=args.platform,
+            project_scoped=args.project,
+            force=args.force,
+        )
+        print(
+            f"Installed AnchorLoop {installation.platform} skill "
+            f"({installation.version}) at {installation.destination}."
+        )
+        return 0
+
+    preview = installer.preview_uninstall(platform=args.platform, project_scoped=args.project)
+    if not args.apply:
+        print("\n".join(preview.lines()))
+        print(_skill_apply_instruction(args, root))
+        return 0
+    installation = installer.uninstall(
+        platform=args.platform,
+        project_scoped=args.project,
+        force=args.force,
+    )
+    print(f"Removed AnchorLoop {installation.platform} skill from {installation.destination}.")
+    return 0
+
+
+def _approval_capture(provenance: str) -> tuple[str, bool]:
+    if provenance == "audit":
+        return provenance, False
+    if provenance == "interactive-tty" and not sys.stdin.isatty():
+        raise AnchorError(
+            "interactive-tty provenance requires an interactive terminal. "
+            "Use audit when recording an auditable but non-authenticated action."
+        )
+    try:
+        confirmation = input("Type APPROVE to record an interactive approval: ").strip()
+    except EOFError as error:
+        raise AnchorError("Interactive approval confirmation was not received.") from error
+    if confirmation != "APPROVE":
+        raise AnchorError("Interactive approval was not confirmed.")
+    return provenance, True
+
+
+def _skill_apply_command(args: argparse.Namespace) -> str:
+    parts = ["anchor", args.command]
+    if args.project:
+        parts.append("--project")
+    parts.extend(["--platform", args.platform, "--apply"])
+    if args.force:
+        parts.append("--force")
+    return " ".join(parts)
+
+
+def _skill_apply_instruction(args: argparse.Namespace, root: Path) -> str:
+    command = _skill_apply_command(args)
+    if args.path == ".":
+        return f"Apply with: {command}"
+    return f"From {root.resolve()}, apply with: {command}"
 
 
 def _run_agent(project: AnchorProject, args: argparse.Namespace) -> int:
@@ -198,8 +361,9 @@ def _print_help() -> None:
         "Engineer owns scope, decisions, rules, skills, and acceptance.\n"
         "The agent may write code only after an explicit approval.\n\n"
         "Setup:   anchor add --apply\n"
+        "Skill:   anchor install --project --platform agents --apply\n"
         "Task:    anchor start \"short title\" -> brief -> plan -> approve -> implement -> review -> precommit -> verify -> close\n"
-        "Rules:   anchor rules list | propose | approve\n"
+        "Rules:   anchor rules list | propose | approve | supersede\n"
         "Agent:   anchor agent detect | setup portable | status\n\n"
         "After anchor start, provide:\n"
         "Outcome:\nScope / non-goals:\nConstraints:\nInvariant or acceptance case:\nMain uncertainty:\n\n"
@@ -209,13 +373,9 @@ def _print_help() -> None:
 
 
 def _print_doctor(project: AnchorProject) -> None:
-    project.require_setup()
-    payload = {
-        "anchor_configured": project.config_path.exists(),
-        "active_task": project.active_task_path.exists(),
-        "graphify": "not-installed (approval required)",
-        "python": sys.version.split()[0],
-    }
+    payload = project.doctor()
+    payload["graphify"] = "not-installed (approval required)"
+    payload["python"] = sys.version.split()[0]
     print(json.dumps(payload, indent=2))
 
 
