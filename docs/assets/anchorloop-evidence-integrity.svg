@@ -66,9 +66,9 @@
 
     <rect x="765" y="392" width="270" height="148" rx="20" fill="url(#checked)" stroke="#6ee7b7" stroke-width="2"/>
     <text x="797" y="436" class="card-title">Workspace fingerprint</text>
-    <text x="797" y="470" class="body" font-size="15">SHA-256 over Git HEAD, diffs,</text>
-    <text x="797" y="494" class="body" font-size="15">staged and untracked files</text>
-    <text x="797" y="522" class="small">Evidence is valid only for this workspace</text>
+    <text x="797" y="470" class="body" font-size="15">SHA-256 over materialized tracked</text>
+    <text x="797" y="494" class="body" font-size="15">and non-ignored untracked content</text>
+    <text x="797" y="522" class="small">Submodule HEAD + dirty status are included</text>
 
     <rect x="1170" y="264" width="205" height="162" rx="20" fill="#123145" stroke="#38bdf8" stroke-width="2"/>
     <text x="1202" y="308" class="card-title">Verify / close</text>

@@ -8,7 +8,13 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 ## Status
 
-Pre-alpha. The first working core is available as a local Python CLI with an optional, installable agent-neutral skill adapter. It creates portable project state, enforces task gates, records rule approval, and provides a small local pre-commit baseline. The repository also contains the npm launcher for a one-command Codex skill install; publishing that package is a separate release step.
+AnchorLoop 0.1 is a release candidate for its first public alpha. The local
+Python CLI, installable agent-neutral skill adapter, transaction/recovery
+boundary, human-ownership modes, and npm launcher are implemented and locally
+packaged. The public npm name still requires a one-time bootstrap publish, so
+the one-command registry install is not production-available until a lower
+bootstrap version reserves the name and the tagged `0.1.0` release plus
+post-publish smoke test succeed.
 
 ## Core idea
 
@@ -22,6 +28,15 @@ AnchorLoop does not measure human-written lines. It focuses on the work that pre
 - selecting skills and external solutions;
 - checking the delivered behaviour;
 - learning when a concept or decision is unclear.
+
+Every plan runs in a recorded ownership mode. `AUTO` selects `FAST` for
+low-risk documentation/chore work, `STANDARD` for ordinary delivery, and
+`CAREFUL` for sensitive work such as authentication, payments, migrations,
+concurrency, infrastructure, destructive changes, public APIs, or new
+dependencies. STANDARD and CAREFUL require an engineer-created artifact,
+trade-off reasoning, a verification strategy, and a comprehension statement;
+CAREFUL also schedules delayed recall. An explicit downgrade is visible in the
+task record and requires a reason.
 
 ## Delivery loop
 
@@ -64,6 +79,15 @@ Every host gets the same task states and approval rules. Native integrations mus
 
 - `anchor install` and `anchor uninstall` preview then manage a packaged, project- or user-scoped skill adapter for generic Agent Skills or explicit Codex locations. They never modify the `.anchor/` workflow state.
 - Anchor-managed state and skill destinations reject symlink and Windows reparse-point components. Writes use unique temporary files plus atomic replacement; `--force` never bypasses that boundary.
+- Project mutations are serialized by a cross-platform lock. State and ordered
+  events commit through a durable redo journal, interrupted commands recover
+  idempotently, and read commands refuse to expose a partial transaction.
+- Skill install, update, and uninstall use a separate durable journal. A retry
+  finishes an interrupted operation rather than leaving an unowned partial
+  skill directory.
+- `anchor doctor` is inspect-only, `doctor --strict` turns findings into a
+  failing health check, and `doctor --repair` explicitly recovers an interrupted
+  transaction or torn final event-log entry.
 - Failed verification is preserved and can explicitly return to implementation or planning with `anchor revise`; it no longer strands the active task.
 - The quality gate records a deterministic workspace fingerprint. Verification and close are blocked when the checked code changes afterward.
 - `anchor init` and `anchor add` preview project setup and require `--apply` before creating files.
@@ -79,6 +103,11 @@ Graphify installation, full language-specific security tooling, project-specific
 ## Install a Codex skill in one command
 
 Requirements: Node.js 18 or newer and Python 3.11 or newer.
+
+> **Registry status:** the `anchorloop` npm package is not published yet, so
+> the public command below will return `E404` until the signed-tag release
+> workflow completes successfully. Use the standalone Git installation in the
+> meantime; do not substitute an unverified similarly named package.
 
 From the project you want to use with Codex:
 
@@ -103,11 +132,9 @@ npx anchorloop install --global
 npx anchorloop install --preview
 ~~~
 
-The npm package itself must be published before `npx anchorloop install` can
-resolve from the public registry. Until that release is available, use the
-standalone Git installation below. npm may keep its own user-level download
-cache; AnchorLoop never writes an npm cache, Python bytecode cache, or workflow
-cache into the project, and those project-local paths are ignored by Git.
+npm may keep its own user-level download cache; AnchorLoop never writes an npm
+cache, Python bytecode cache, or workflow cache into the project, and those
+project-local paths are ignored by Git.
 
 ## Install the standalone command-line tool
 
@@ -194,7 +221,10 @@ anchor start "Retry temporary webhook failures"
 anchor brief --by "Ada Engineer" --outcome "Retry temporary failures" --scope "Webhook delivery only" --constraints "Keep the API compatible" --invariant "A transient failure retries safely" --uncertainty "Provider retry limits"
 ~~~
 
-The first command only prints the setup plan. The second creates state. Nothing is installed, indexed, committed, or changed in application source code without an explicit command.
+The first command only prints the setup plan, including the managed entries it
+will append to the root and `.anchor` Git ignore files. The second creates
+state. Nothing is installed, indexed, committed, or changed in application
+source code without an explicit command.
 
 After starting a task, AnchorLoop asks the engineer for:
 
@@ -206,23 +236,29 @@ Invariant or acceptance case:
 Main uncertainty:
 ~~~
 
-Then progress deliberately:
+Then progress deliberately. The human artifact and comprehension text below
+must come from the engineer; an agent must not manufacture them:
 
 ~~~sh
-anchor plan --summary "Use bounded exponential backoff and preserve delivery idempotency."
+anchor plan --summary "Use bounded exponential backoff and preserve delivery idempotency." --mode AUTO --task-type feature --approach "Retry only transient responses with a bounded idempotent schedule." --alternative "Immediate unlimited retries were rejected because they amplify outages." --risk "A retry can duplicate delivery." --verification "Exercise a transient failure and assert one final delivery." --human-artifact "Ada's acceptance case: two transient failures then one successful delivery with the same id." --comprehension "Prediction: the idempotency key prevents duplicate side effects across attempts." --by "Ada Engineer"
 anchor approve --by "Ada Engineer"
 anchor implement
 anchor review
 anchor precommit
-anchor verify --by "Ada Engineer" --result pass --reason "The documented manual scenario passed."
+anchor verify --by "Ada Engineer" --result pass --reason "The documented manual scenario passed." --recall "The bounded schedule controls load; the stable key controls duplicate effects."
 anchor close
 ~~~
+
+For a CAREFUL task, add `--rollback-mitigation` to the plan. After close,
+AnchorLoop records `recall_due_at`; once due, the engineer can record delayed
+recall with `anchor recall --task <id> --by "Ada Engineer" --response "..."
+--score 0..5`.
 
 If manual verification fails, preserve that evidence and return through an
 explicit revision rather than abandoning the active task:
 
 ~~~sh
-anchor verify --by "Ada Engineer" --result fail --reason "The retry still loses the delivery id."
+anchor verify --by "Ada Engineer" --result fail --reason "The retry still loses the delivery id." --recall "The key is regenerated on each attempt, so the invariant does not hold."
 anchor revise --target implement --reason "Fix the observed behavior within the approved scope."
 ~~~
 
@@ -257,10 +293,14 @@ The current baseline blocks:
 
 It also records that project-specific formatter, linter, type-checker, test-runner, dependency scanner, and framework security profile still need explicit configuration. This command never creates a Git commit.
 
-Each successful run stores a SHA-256 fingerprint of the checked workspace. If
-the tracked diff, staged diff, untracked files, or Git HEAD change before
-verification or close, AnchorLoop returns the task to review and requires a new
-pre-commit run.
+Each successful run stores a SHA-256 fingerprint of the materialized tracked
+and non-ignored untracked files. Git HEAD, index, and diff state are recorded
+separately for diagnostics, so an ordinary commit does not invalidate evidence
+when the checked files are byte-for-byte unchanged. A submodule's checked-out
+materialized files are fingerprinted recursively, including nested dirty and
+non-ignored untracked content. An uninitialized submodule is bound to its
+tracked gitlink. If checked content changes before verification or close,
+AnchorLoop returns the task to review and requires a new pre-commit run.
 
 Fingerprint entries are length-framed and store a per-file content digest; a
 symlink is recorded as a link target rather than read through to an external
@@ -272,6 +312,15 @@ file.
 
 AnchorLoop records evidence, not identity: a changed approved artifact archives
 the approval, while changed checked code requires review and pre-commit again.
+Verification can also record reported agent turns, input/output tokens, active
+minutes, and a provider/model pair. Together with task mode/type, wall time,
+and recall score, these fields make a model-by-mode pilot exportable from the
+closed task JSON without turning estimates into trusted telemetry.
+
+After an engineer observes production follow-up, `anchor outcome` records the
+latest defect count and whether rollback or corrective refactoring was needed.
+`anchor report --format json|csv` aggregates closed tasks locally for a
+model-by-mode pilot; it performs no network upload.
 
 DRY, KISS, YAGNI, SOLID, clean-code, and structural checks are evidence-based policies: a finding must point to a concrete location, explain the likely cost, and propose a proportionate alternative. AnchorLoop must not turn those principles into generic style policing.
 
@@ -287,10 +336,19 @@ DRY, KISS, YAGNI, SOLID, clean-code, and structural checks are evidence-based po
   architecture/             structure proposals and policy
   graphify/                 integration metadata
   agents/                   detected capabilities and adapter manifests
+  project.lock              ignored cross-process lock metadata
+  transactions/ and outbox/ ignored recovery journals and delivery state
   cache/ and logs/          ignored local artefacts
 ~~~
 
 The files are deliberately readable. The CLI validates changes but does not hide decisions in a remote service or model memory.
+Transaction receipts are bounded to the latest 128 successful operations;
+event IDs remain conflict-checked against the durable event log. After
+upgrading an existing project, rerun `anchor add --apply` (or the equivalent
+pinned npx command) to append missing cache and recovery entries to the project
+`.gitignore` and `.anchor/.gitignore` while preserving custom lines. Git does
+not automatically untrack a file that was already committed, so inspect the
+index separately during that migration.
 
 ## Documentation
 

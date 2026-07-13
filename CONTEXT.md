@@ -13,7 +13,8 @@
 - **Human artifact** — an engineer-authored acceptance case, invariant, root-cause hypothesis, rollback plan, or benchmark hypothesis.
 - **Verification** — automated evidence plus a human-performed scenario; green tests alone are not final verification.
 - **Comprehension check** — an engineer explanation, prediction, or debugging hypothesis produced without an AI-provided answer.
-- **Quality gate** — a deterministic and review-based pre-commit check of tests, code quality, and security evidence for the current diff. It does not create a commit.
+- **Post-completion outcome** — an engineer-reported follow-up for a closed task: cumulative defects found, rollback, corrective refactor, and notes. It is audit evidence rather than automatically observed telemetry.
+- **Quality gate** — the deterministic local syntax, security, whitespace, workspace-stability, and fingerprint evidence recorded by `anchor precommit`. Project-specific format, lint, type, test, and dependency commands remain explicit future profiles; the gate does not pretend they ran and never creates a commit.
 - **Code standards** — the always-on implementation rules: meaningful names, comments that explain why, small safe refactors, and context-sensitive DRY, KISS, YAGNI, and SOLID review.
 - **Rule proposal** — a proposed addition, change, or retirement of a project rule. It has no effect until the engineer approves its exact version.
 - **Active ruleset** — the immutable, versioned set of engineer-approved code-quality, security, and project-structure rules used for a task.

@@ -4,14 +4,26 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { assertVersionConsistency } = require("../scripts/version.js");
 
 const packageRoot = path.resolve(__dirname, "..", "..");
-const packageMetadata = require(path.join(packageRoot, "package.json"));
 const sourceRoot = path.join(packageRoot, "src");
 const supportedPlatforms = new Set(["agents", "codex"]);
+const isolatedPythonEntry = [
+  "import runpy, sys",
+  "source_root = sys.argv.pop(1)",
+  "sys.path.insert(0, source_root)",
+  "sys.argv[0] = 'anchorloop'",
+  "runpy.run_module('anchorloop.cli', run_name='__main__')",
+].join("; ");
+
+function bundledRelease() {
+  return assertVersionConsistency({ root: packageRoot });
+}
 
 function printUsage() {
-  console.log(`AnchorLoop ${packageMetadata.version}
+  const { version } = bundledRelease();
+  console.log(`AnchorLoop ${version}
 
 Usage:
   npx anchorloop install [--platform codex|agents] [--global] [--preview] [--force]
@@ -76,6 +88,7 @@ function optionValue(args, index, option) {
 }
 
 function parseShortcutOptions(command, args) {
+  const release = bundledRelease();
   let platform = "codex";
   let projectScoped = true;
   let apply = true;
@@ -125,7 +138,7 @@ function parseShortcutOptions(command, args) {
       "--skill-runtime",
       "npx",
       "--npx-package",
-      `${packageMetadata.name}@${packageMetadata.version}`,
+      `${release.packageName}@${release.version}`,
     );
   }
   if (projectPath) {
@@ -144,17 +157,16 @@ function runAnchor(backendArgs, environment = process.env) {
       "AnchorLoop requires Python 3.11 or newer. Install it, or set ANCHORLOOP_PYTHON to its executable path.",
     );
   }
-  const pythonPath = environment.PYTHONPATH
-    ? `${sourceRoot}${path.delimiter}${environment.PYTHONPATH}`
-    : sourceRoot;
+  const { packageName, version } = bundledRelease();
   const result = spawnSync(
     python.command,
-    [...python.args, "-m", "anchorloop.cli", ...backendArgs],
+    [...python.args, "-I", "-B", "-c", isolatedPythonEntry, sourceRoot, ...backendArgs],
     {
       cwd: process.cwd(),
       env: {
         ...environment,
-        PYTHONPATH: pythonPath,
+        ANCHORLOOP_BUNDLED_VERSION: version,
+        ANCHORLOOP_COMMAND: `npx --yes ${packageName}@${version}`,
         PYTHONDONTWRITEBYTECODE: "1",
       },
       shell: false,
@@ -169,15 +181,16 @@ function runAnchor(backendArgs, environment = process.env) {
 }
 
 function main(args = process.argv.slice(2)) {
-  if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
-    printUsage();
-    return 0;
-  }
-  if (args[0] === "--version" || args[0] === "-v") {
-    console.log(packageMetadata.version);
-    return 0;
-  }
   try {
+    const release = bundledRelease();
+    if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+      printUsage();
+      return 0;
+    }
+    if (args[0] === "--version" || args[0] === "-v") {
+      console.log(release.version);
+      return 0;
+    }
     if (args[0] === "install" || args[0] === "uninstall") {
       if (args.includes("--help") || args.includes("-h")) {
         printUsage();

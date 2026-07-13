@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from anchorloop.cli import main
+from anchorloop.quality import workspace_fingerprint
 
 
 def record_brief(root: Path) -> int:
@@ -34,7 +35,61 @@ def record_brief(root: Path) -> int:
     )
 
 
+def record_plan(root: Path, summary: str) -> int:
+    return main(
+        [
+            "plan",
+            "--summary",
+            summary,
+            "--mode",
+            "STANDARD",
+            "--task-type",
+            "feature",
+            "--approach",
+            summary,
+            "--alternative",
+            "A broader rewrite was rejected as unnecessary.",
+            "--risk",
+            "The acceptance invariant could regress.",
+            "--verification",
+            "Run the acceptance scenario and deterministic checks.",
+            "--human-artifact",
+            "Acceptance case: the requested behavior succeeds without unrelated changes.",
+            "--comprehension",
+            "Prediction: the smallest scoped change preserves the public interface.",
+            "--by",
+            "Ada Engineer",
+            "--path",
+            str(root),
+        ]
+    )
+
+
 class AnchorCliTests(unittest.TestCase):
+    def test_add_preview_discloses_gitignore_changes_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+
+            with contextlib.redirect_stdout(output):
+                result = main(["add", "--path", str(root)])
+
+            self.assertEqual(result, 0)
+            self.assertIn(
+                "Will create or append managed cache and recovery rules in .gitignore and .anchor/.gitignore",
+                output.getvalue(),
+            )
+            self.assertIn("Detected project markers: none.", output.getvalue())
+            self.assertFalse((root / ".gitignore").exists())
+            self.assertFalse((root / ".anchor").exists())
+
+            (root / "package.json").write_text("{}", encoding="utf-8")
+            (root / "pyproject.toml").write_text("[project]\nname = 'fixture'\n", encoding="utf-8")
+            detected_output = io.StringIO()
+            with contextlib.redirect_stdout(detected_output):
+                self.assertEqual(main(["add", "--path", str(root)]), 0)
+            self.assertIn("Detected project markers: python, node.", detected_output.getvalue())
+
     def test_add_apply_creates_portable_project_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -62,9 +117,9 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["start", "Retry webhooks", "--path", str(root)]), 0)
 
             self.assertEqual(main(["implement", "--path", str(root)]), 2)
-            self.assertEqual(main(["plan", "--summary", "Retry with bounded backoff.", "--path", str(root)]), 2)
+            self.assertEqual(record_plan(root, "Retry with bounded backoff."), 2)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Retry with bounded backoff.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Retry with bounded backoff."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             self.assertEqual(main(["implement", "--path", str(root)]), 0)
 
@@ -79,7 +134,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Pin the approved task", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Implement the approved change.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Implement the approved change."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
 
             task_path = root / ".anchor" / "tasks" / "active.json"
@@ -109,7 +164,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Protect a revised task", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Use the approved approach.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Use the approved approach."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -181,7 +236,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Validate quality", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Run the local quality gate.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Run the local quality gate."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -213,7 +268,7 @@ class AnchorCliTests(unittest.TestCase):
             )
             self.assertEqual(main(["start", "Protect configuration", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Use configured secret storage.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Use configured secret storage."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -230,7 +285,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Pin rules", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Keep this ruleset snapshot.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Keep this ruleset snapshot."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             self.assertEqual(
                 main(
@@ -262,7 +317,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["start", "Ship a small change", "--path", str(root)]), 0)
 
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Implement the smallest safe change.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Implement the smallest safe change."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -276,6 +331,8 @@ class AnchorCliTests(unittest.TestCase):
                         "pass",
                         "--reason",
                         "Acceptance scenario completed successfully.",
+                        "--recall",
+                        "The acceptance invariant is the reason this plan is safe.",
                         "--path",
                         str(root),
                     ]
@@ -332,7 +389,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Repair behaviour", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Implement the smallest repair.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Implement the smallest repair."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -347,6 +404,8 @@ class AnchorCliTests(unittest.TestCase):
                         "fail",
                         "--reason",
                         "The acceptance scenario still fails.",
+                        "--recall",
+                        "The observed failure disproves the planned behavior.",
                         "--path",
                         str(root),
                     ]
@@ -377,7 +436,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Protect checked code", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Run the quality gate.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Run the quality gate."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -393,6 +452,8 @@ class AnchorCliTests(unittest.TestCase):
                         "pass",
                         "--reason",
                         "The original acceptance scenario passed.",
+                        "--recall",
+                        "The changed workspace invalidates the earlier evidence.",
                         "--path",
                         str(root),
                     ]
@@ -428,7 +489,7 @@ class AnchorCliTests(unittest.TestCase):
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Verify Git snapshot", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Check the Git fingerprint.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Check the Git fingerprint."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -443,6 +504,8 @@ class AnchorCliTests(unittest.TestCase):
                         "pass",
                         "--reason",
                         "The unchanged Git fixture passed.",
+                        "--recall",
+                        "Anchor state is excluded from the materialized evidence.",
                         "--path",
                         str(root),
                     ]
@@ -452,13 +515,139 @@ class AnchorCliTests(unittest.TestCase):
             task = json.loads((root / ".anchor" / "tasks" / "active.json").read_text())
             self.assertEqual(task["state"], "verified")
 
+    def test_git_commit_does_not_invalidate_identical_materialized_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tracked = root / "tracked.py"
+            tracked.write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "add", "tracked.py"], cwd=root, check=True, capture_output=True)
+            identity = [
+                "-c",
+                "user.name=AnchorLoop Test",
+                "-c",
+                "user.email=anchorloop@example.test",
+            ]
+            subprocess.run(
+                ["git", *identity, "commit", "-m", "Initial fixture"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
+            self.assertEqual(main(["start", "Commit after quality", "--path", str(root)]), 0)
+            self.assertEqual(record_brief(root), 0)
+            self.assertEqual(record_plan(root, "Verify the materialized tree."), 0)
+            self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
+            self.assertEqual(main(["implement", "--path", str(root)]), 0)
+            tracked.write_text("value = 2\n", encoding="utf-8")
+            self.assertEqual(main(["review", "--path", str(root)]), 0)
+            self.assertEqual(main(["precommit", "--path", str(root)]), 0)
+            before = json.loads((root / ".anchor" / "tasks" / "active.json").read_text())[
+                "quality"
+            ][-1]["workspace_fingerprint"]
+
+            subprocess.run(["git", "add", "tracked.py"], cwd=root, check=True, capture_output=True)
+            subprocess.run(
+                ["git", *identity, "commit", "-m", "Materialize checked change"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "verify",
+                        "--by",
+                        "Ada Engineer",
+                        "--result",
+                        "pass",
+                        "--reason",
+                        "The checked content is unchanged by the commit.",
+                        "--recall",
+                        "A metadata-only commit does not change the checked files.",
+                        "--path",
+                        str(root),
+                    ]
+                ),
+                0,
+            )
+            after = json.loads((root / ".anchor" / "tasks" / "active.json").read_text())
+            self.assertEqual(after["state"], "verified")
+            self.assertEqual(before["digest"], before["content_digest"])
+
+    def test_git_submodule_worktree_changes_invalidate_materialized_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "root"
+            root.mkdir()
+            child = root / "vendor" / "child"
+            child.mkdir(parents=True)
+            identity = [
+                "-c",
+                "user.name=AnchorLoop Test",
+                "-c",
+                "user.email=anchorloop@example.test",
+            ]
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "init"], cwd=child, check=True, capture_output=True)
+            (child / "module.py").write_text("value = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "module.py"], cwd=child, check=True, capture_output=True)
+            subprocess.run(
+                ["git", *identity, "commit", "-m", "Child fixture"],
+                cwd=child,
+                check=True,
+                capture_output=True,
+            )
+            child_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=child,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                [
+                    "git",
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    f"160000,{child_head},vendor/child",
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", *identity, "commit", "-m", "Root fixture"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            before = workspace_fingerprint(root)
+            (root / "vendor" / "child" / "module.py").write_text("value = 2\n", encoding="utf-8")
+            after = workspace_fingerprint(root)
+
+            self.assertNotEqual(before["digest"], after["digest"])
+            self.assertEqual(after["source"], "git-materialized")
+
+            # A porcelain status only says that the submodule is dirty. The
+            # fingerprint must still distinguish two different dirty trees.
+            dirty_before = after
+            (root / "vendor" / "child" / "module.py").write_text(
+                "value = 3\n", encoding="utf-8"
+            )
+            dirty_after = workspace_fingerprint(root)
+            self.assertNotEqual(dirty_before["digest"], dirty_after["digest"])
+
     def test_legacy_quality_evidence_returns_to_review_ready(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
             self.assertEqual(main(["start", "Recover legacy task", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Refresh quality evidence.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Refresh quality evidence."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
                 self.assertEqual(main([action, "--path", str(root)]), 0)
@@ -478,6 +667,8 @@ class AnchorCliTests(unittest.TestCase):
                         "pass",
                         "--reason",
                         "This should require fresh quality evidence.",
+                        "--recall",
+                        "Legacy evidence has no trustworthy content fingerprint.",
                         "--path",
                         str(root),
                     ]
@@ -538,7 +729,7 @@ class AnchorCliTests(unittest.TestCase):
 
             self.assertEqual(main(["start", "Pin exact rule wording", "--path", str(root)]), 0)
             self.assertEqual(record_brief(root), 0)
-            self.assertEqual(main(["plan", "--summary", "Use the current ruleset.", "--path", str(root)]), 0)
+            self.assertEqual(record_plan(root, "Use the current ruleset."), 0)
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 2)
             task = json.loads((root / ".anchor" / "tasks" / "active.json").read_text())
             self.assertEqual(task["state"], "planned")

@@ -1,120 +1,62 @@
-# AnchorLoop decision map
+# AnchorLoop release decision map
 
-This compact map records decisions that need a deliberate answer before public beta. The plan uses the stated default where possible.
+This map separates resolved 0.1 decisions from external release blockers and
+post-release product questions.
 
-## #1: First distribution target
+## Resolved for 0.1
 
-Blocked by: none  
-Type: Discuss
+| Decision | Resolution |
+|---|---|
+| Core runtime | Python 3.11+ owns workflow/state; the npm package is a thin Node 18+ launcher around bundled Python source. |
+| Source of truth | The CLI and `.anchor/` state, never a Codex-only skill, model, provider, or slash-command format. |
+| Skill distribution | Project or user scope; generic `.agents/skills` and explicit `.codex/skills`; preview/apply and owned-file uninstall. |
+| Version source | `src/anchorloop/version.py`; Python metadata reads it and npm/tag values are checked against it. |
+| Mutation model | One interprocess lock plus validated redo journal and ordered event outbox for every project mutation. |
+| Quality fingerprint | Materialized tracked/non-ignored files, recursively including submodules; Git metadata is diagnostic only. |
+| Human modes | AUTO recommendation with FAST/STANDARD/CAREFUL, explicit downgrade reason, human artifact/comprehension, and CAREFUL delayed recall. |
+| Cache/recovery state | Ignored local runtime data; never committed as workflow evidence. |
+| Trust statement | `--by` and interactive TTY confirmation are auditable provenance, not authenticated identity. |
 
-### Question
+## External release blocker
 
-How will the first public release provide the same core workflow to all coding agents while using native integrations only where a host supports them?
+### npm name bootstrap
 
-### Answer
+`anchorloop` currently returns E404 in the public registry. A maintainer must
+either reserve it with a lower, version-consistent bootstrap release (for
+example `0.0.0`) or switch every manifest, runner, workflow, and document to an
+owned scope. The bootstrap must not consume the intended alpha version: npm
+versions are immutable, while `0.1.0` must be published from its signed tag
+with OIDC provenance. No code path may claim that `npx anchorloop install`
+works publicly before registry smoke succeeds.
 
-Resolved: AnchorLoop has an agent-neutral core from the first release. Every coding agent can use the `anchor` CLI and portable workflow files; native adapters are added where a host exposes commands, skills, hooks, or MCP. No host-specific integration may become the source of truth.
+## Decisions before public beta
 
-## #2: CLI runtime
+### Trusted approval channel
 
-Blocked by: none
-Type: Prototype
+Choose a host adapter or separate channel that can bind approval to an
+authenticated human while leaving the local audit contract usable without it.
 
-### Question
+### Project-specific quality profiles
 
-Should `anchor` use TypeScript/Node, Python, or a compiled runtime?
+Define explicit, engineer-approved formatter, linter, type-checker, test, and
+dependency commands per stack. Commands, timeouts, network behavior, and
+evidence must be visible; AnchorLoop must not execute repository-supplied
+commands merely because it discovered them.
 
-### Answer
+### Outcome measurement and export
 
-Pending. Prototype bootstrap, YAML/JSON state, subprocess calls, and cross-platform install first. The runtime must not decide the workflow model.
+Add post-completion defect/rollback/refactor outcomes and a privacy-preserving
+aggregate export for model × mode pilots. Reported token/time fields must never
+be presented as provider-verified telemetry.
 
-## #3: Skill catalogue and trust policy
+### State evolution
 
-Blocked by: none
-Type: Research
+Define schema migration policy and compatibility promises before a stable
+release. Re-running setup currently appends new managed ignore entries while
+preserving custom lines; migration must remain explicit and recoverable.
 
-### Question
+### Optional navigation and host integrations
 
-Which sources may `anchor skills find` search, how are candidates ranked, and what is required before installation?
-
-### Answer
-
-Pending. Default: local skills first, then allowlisted public registries and GitHub; show source, version, license when known, and an install preview. Never auto-install.
-
-## #4: Network and privacy policy
-
-Blocked by: #3  
-Type: Discuss
-
-### Question
-
-What leaves the developer machine for research and skill discovery?
-
-### Answer
-
-Pending. Default: source code, briefs, task history, and learning history remain local. External research sends only an engineer-approved query.
-
-## #5: Versioning project state
-
-Blocked by: none  
-Type: Discuss
-
-### Question
-
-Which `.anchor/` artifacts should be committed for a team, and which remain private?
-
-### Answer
-
-Pending. Default: commit workflows, policies, and task contracts; ignore cache, raw logs, research cache, and individual learning records.
-
-## #6: Graph map lifecycle
-
-Blocked by: #1, #5  
-Type: Prototype
-
-### Question
-
-Should `graphify-out/` be committed by default, and how will Anchor avoid stale or recursive indexing?
-
-### Answer
-
-Pending. Default: code-only initial map, incremental updates, `.graphifyignore` excluding `.anchor/` and generated directories, then an explicit commit choice.
-
-## #7: Learning retention
-
-Blocked by: #5  
-Type: Discuss
-
-### Question
-
-Which learning signals are useful enough to retain without turning Anchor into an intrusive tutor?
-
-### Answer
-
-Pending. Default: learning is opt-in; only an engineer-requested note or delayed recall result is stored locally.
-
-## #8: Quality and security tool profiles
-
-Blocked by: #2, #4
-Type: Prototype
-
-### Question
-
-Which language/framework-specific linters, formatters, type checkers, secret scanners, dependency checks, and security rules should `anchor precommit` run without creating a noisy or non-reproducible gate?
-
-### Answer
-
-Pending. Default: run configured project commands plus a diff-based clean-code and security review. Detect Python, JavaScript/TypeScript, and Go to load framework-appropriate guidance; use generic, transparent checks for unsupported stacks. Every tool and network call is visible in the pre-commit result.
-
-## #9: Rule governance and structure policy
-
-Blocked by: #5, #8  
-Type: Discuss
-
-### Question
-
-How should a new project approve its initial code-quality, security, and structure policy without making setup onerous, and which structure fields are universal rather than stack-specific?
-
-### Answer
-
-Pending. Default: setup creates reviewable baseline policy packs as proposals, not active rules. The engineer approves one or more exact versions. Later additions, edits, and retirements use the same proposal/approval log; active rules never change silently.
+Evaluate Graphify, hooks, native slash commands, and MCP only as opt-in thin
+adapters. Record dependency, cache, privacy, and permission costs before any
+installation or invocation.

@@ -91,33 +91,172 @@ def run_precommit(root: Path, *, active_categories: set[str]) -> dict[str, Any]:
 def workspace_fingerprint(root: Path) -> dict[str, Any]:
     """Return a deterministic snapshot of the checked workspace state.
 
-    Git repositories use HEAD, staged and unstaged binary diffs, plus the
-    contents of untracked files. A non-Git directory falls back to a recursive
-    local snapshot while excluding generated and Anchor-owned directories.
+    Verification is bound to the materialized files, not Git metadata. In a
+    Git repository tracked and untracked (non-ignored) paths are enumerated by
+    Git, then read from the working tree. HEAD/index/diff state is recorded in
+    a separate diagnostic digest so a metadata-only commit does not invalidate
+    otherwise identical quality evidence.
     """
 
-    git_fingerprint = _git_workspace_fingerprint(root)
-    if git_fingerprint is not None:
-        return git_fingerprint
+    return _workspace_fingerprint(root.resolve(), ancestors=frozenset())
 
+
+def _workspace_fingerprint(root: Path, *, ancestors: frozenset[str]) -> dict[str, Any]:
+    """Fingerprint one materialized tree, recursively including submodules."""
+
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        digest = hashlib.sha256(b"anchorloop-workspace-v3\0submodule-cycle\0").hexdigest()
+        return {
+            "algorithm": "sha256",
+            "format_version": 3,
+            "digest": f"sha256:{digest}",
+            "content_digest": f"sha256:{digest}",
+            "git_state_digest": None,
+            "source": "submodule-cycle",
+            "files": 0,
+            "head": None,
+        }
+
+    descendants = ancestors | {identity}
+    git_entries = _git_materialized_paths(root, ancestors=descendants)
+    if git_entries is not None:
+        git_paths, submodules = git_entries
+        head, git_state_digest = _git_state_diagnostics(root)
+        return _materialized_fingerprint(
+            root,
+            git_paths,
+            submodules=submodules,
+            source="git-materialized",
+            head=head,
+            git_state_digest=git_state_digest,
+        )
+    return _materialized_fingerprint(
+        root,
+        sorted(_fingerprint_files(root), key=lambda path: path.relative_to(root).as_posix()),
+        submodules=[],
+        source="filesystem",
+        head=None,
+        git_state_digest=None,
+    )
+
+
+def _materialized_fingerprint(
+    root: Path,
+    files: list[Path],
+    *,
+    submodules: list[dict[str, Any]],
+    source: str,
+    head: str | None,
+    git_state_digest: str | None,
+) -> dict[str, Any]:
     digest = hashlib.sha256()
-    digest.update(b"anchorloop-workspace-v2\0filesystem\0")
-    files = sorted(_fingerprint_files(root), key=lambda path: path.relative_to(root).as_posix())
+    digest.update(b"anchorloop-workspace-v3\0materialized-tree\0")
     for path in files:
         _update_digest_with_file(digest, root, path)
+    for submodule in submodules:
+        _update_digest_value(digest, b"entry", b"git-submodule")
+        _update_digest_value(digest, b"path", submodule["path"])
+        _update_digest_value(digest, b"state", submodule["state"])
+        if submodule.get("content_digest") is not None:
+            _update_digest_value(digest, b"content-digest", submodule["content_digest"])
+        else:
+            # An uninitialized or unsafe submodule has no materialized tree to
+            # read, so bind the evidence to the tracked gitlink instead.
+            _update_digest_value(digest, b"index-oid", submodule["index_oid"])
     return {
         "algorithm": "sha256",
-        "format_version": 2,
+        "format_version": 3,
         "digest": f"sha256:{digest.hexdigest()}",
-        "source": "filesystem",
-        "files": len(files),
-        "head": None,
+        "content_digest": f"sha256:{digest.hexdigest()}",
+        "git_state_digest": git_state_digest,
+        "source": source,
+        "files": len(files)
+        + sum(max(1, int(submodule.get("files", 0))) for submodule in submodules),
+        "head": head,
     }
 
 
-def _git_workspace_fingerprint(root: Path) -> dict[str, Any] | None:
+def _git_materialized_paths(
+    root: Path,
+    *,
+    ancestors: frozenset[str],
+) -> tuple[list[Path], list[dict[str, Any]]] | None:
     if not (root / ".git").exists():
         return None
+
+    listed = _git_bytes(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--")
+    if listed is None:
+        return None
+    staged = _git_bytes(root, "ls-files", "--stage", "-z", "--")
+    if staged is None:
+        return None
+    submodule_names: dict[str, bytes] = {}
+    for record in staged.split(b"\0"):
+        if not record or b"\t" not in record:
+            continue
+        metadata, encoded_name = record.split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) >= 2 and fields[0] == b"160000":
+            submodule_names[
+                encoded_name.decode("utf-8", errors="surrogateescape")
+            ] = fields[1]
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for encoded_name in listed.split(b"\0"):
+        if not encoded_name:
+            continue
+        name = encoded_name.decode("utf-8", errors="surrogateescape")
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in submodule_names:
+            continue
+        path = root / name
+        if _is_fingerprintable_path(path) and not _is_anchor_owned_path(root, path):
+            paths.append(path)
+    submodules: list[dict[str, Any]] = []
+    for name in sorted(submodule_names):
+        encoded_name = name.encode("utf-8", errors="surrogateescape")
+        index_oid = submodule_names[name]
+        submodule_path = root / name
+        head_result = _git_bytes(root, "-C", name, "rev-parse", "--verify", "HEAD")
+        status_result = _git_bytes(root, "-C", name, "status", "--porcelain=v1", "-z")
+        head = head_result if head_result is not None else b"<missing>"
+        status = status_result if status_result is not None else b"<unavailable>"
+        record: dict[str, Any] = {
+            "path": encoded_name,
+            "index_oid": index_oid,
+            "head": head.strip(),
+            "status": status,
+            "files": 0,
+            "content_digest": None,
+        }
+        try:
+            resolved_submodule = submodule_path.resolve(strict=True)
+            resolved_submodule.relative_to(root)
+            submodule_identity = os.path.normcase(str(resolved_submodule))
+            if not resolved_submodule.is_dir():
+                record["state"] = b"uninitialized"
+            elif submodule_identity in ancestors:
+                record["state"] = b"cycle"
+            else:
+                nested = _workspace_fingerprint(resolved_submodule, ancestors=ancestors)
+                record["state"] = (
+                    b"materialized-git"
+                    if (resolved_submodule / ".git").exists()
+                    else b"materialized-filesystem"
+                )
+                record["content_digest"] = nested["content_digest"].encode("ascii")
+                record["files"] = nested["files"]
+        except (OSError, ValueError):
+            record["state"] = b"uninitialized-or-unsafe"
+        submodules.append(record)
+    return sorted(paths, key=lambda path: path.relative_to(root).as_posix()), submodules
+
+
+def _git_state_diagnostics(root: Path) -> tuple[str | None, str | None]:
+    """Return non-gating Git diagnostics for audit and troubleshooting."""
 
     head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
     staged = _git_bytes(
@@ -137,33 +276,18 @@ def _git_workspace_fingerprint(root: Path) -> dict[str, Any] | None:
         ".",
         ":(exclude).anchor/**",
     )
-    untracked = _git_bytes(root, "ls-files", "--others", "--exclude-standard", "-z")
-    if staged is None or unstaged is None or untracked is None:
-        return None
+    if staged is None or unstaged is None:
+        return None, None
 
     digest = hashlib.sha256()
-    digest.update(b"anchorloop-workspace-v2\0git\0")
+    digest.update(b"anchorloop-git-state-v1\0")
     _update_digest_value(digest, b"head", head or b"<unborn>")
     _update_digest_value(digest, b"staged", staged)
     _update_digest_value(digest, b"unstaged", unstaged)
-
-    untracked_count = 0
-    for encoded_name in untracked.split(b"\0"):
-        if not encoded_name:
-            continue
-        path = root / encoded_name.decode("utf-8", errors="surrogateescape")
-        if _is_fingerprintable_path(path) and not _is_anchor_owned_path(root, path):
-            _update_digest_with_file(digest, root, path)
-            untracked_count += 1
-
-    return {
-        "algorithm": "sha256",
-        "format_version": 2,
-        "digest": f"sha256:{digest.hexdigest()}",
-        "source": "git",
-        "files": untracked_count,
-        "head": head.decode("utf-8", errors="replace").strip() if head else None,
-    }
+    return (
+        head.decode("utf-8", errors="replace").strip() if head else None,
+        f"sha256:{digest.hexdigest()}",
+    )
 
 
 def _git_bytes(root: Path, *arguments: str) -> bytes | None:

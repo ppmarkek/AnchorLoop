@@ -14,6 +14,33 @@ def _run(root: Path, *arguments: str) -> int:
     return main([*arguments, "--path", str(root)])
 
 
+def _plan(root: Path, summary: str) -> int:
+    return _run(
+        root,
+        "plan",
+        "--summary",
+        summary,
+        "--mode",
+        "STANDARD",
+        "--task-type",
+        "feature",
+        "--approach",
+        summary,
+        "--alternative",
+        "A broad rewrite was rejected.",
+        "--risk",
+        "The acceptance invariant could regress.",
+        "--verification",
+        "Run deterministic checks and the acceptance scenario.",
+        "--human-artifact",
+        "Acceptance case: the named behavior succeeds.",
+        "--comprehension",
+        "Prediction: the scoped patch preserves the invariant.",
+        "--by",
+        "Ada Engineer",
+    )
+
+
 def _approved_task(root: Path) -> None:
     assert _run(root, "add", "--apply") == 0
     assert _run(root, "start", "Protect workflow integrity") == 0
@@ -36,7 +63,7 @@ def _approved_task(root: Path) -> None:
         )
         == 0
     )
-    assert _run(root, "plan", "--summary", "Implement the smallest safe change.") == 0
+    assert _plan(root, "Implement the smallest safe change.") == 0
     assert _run(root, "approve", "--by", "Ada Engineer") == 0
 
 
@@ -54,7 +81,7 @@ class IntegrityRegressionTests(unittest.TestCase):
             invalidated = json.loads(task_path.read_text(encoding="utf-8"))
             self.assertEqual(invalidated["state"], "briefing")
             self.assertNotIn("brief_record", invalidated)
-            self.assertEqual(_run(root, "plan", "--summary", "Bypass the brief."), 2)
+            self.assertEqual(_plan(root, "Bypass the brief."), 2)
 
     def test_changed_brief_record_invalidates_task_approval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -99,7 +126,7 @@ class IntegrityRegressionTests(unittest.TestCase):
             task = json.loads((root / ".anchor" / "tasks" / "active.json").read_text(encoding="utf-8"))
             self.assertEqual(task["state"], "planned")
 
-            self.assertEqual(_run(root, "plan", "--summary", "Use the corrected approach."), 0)
+            self.assertEqual(_plan(root, "Use the corrected approach."), 0)
             self.assertEqual(_run(root, "approve", "--by", "Ada Engineer"), 0)
             self.assertEqual(_run(root, "implement"), 0)
             self.assertEqual(

@@ -192,6 +192,7 @@ class SafeProjectFS:
         self._require_regular_file(candidate, metadata)
         try:
             os.unlink(candidate)
+            self._fsync_directory(candidate.parent)
         except OSError as error:
             raise AnchorError(f"Cannot remove managed file: {candidate}") from error
 
@@ -213,7 +214,9 @@ class SafeProjectFS:
                 os.rmdir(current)
             except OSError:
                 return
-            current = current.parent
+            parent = current.parent
+            self._fsync_directory(parent)
+            current = parent
 
     def _validate_existing_components(self, relative: Path) -> None:
         root_metadata = self._lstat(self.root)

@@ -4,21 +4,34 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.14"
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
@@ -35,8 +48,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip build
@@ -81,18 +94,19 @@ jobs:
           if (-not (Test-Path $codexSkill)) { throw "The installed wheel did not provide the Codex SKILL.md." }
 
   npm-runner:
-    name: npm runner (${{ matrix.os }})
+    name: npm runner (Node ${{ matrix.node-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        node-version: ["18", "20", "22"]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: "22"
-      - uses: actions/setup-python@v6
+          node-version: ${{ matrix.node-version }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - run: npm test
@@ -111,12 +125,25 @@ jobs:
           New-Item -ItemType Directory -Force -Path $packageDirectory, $project | Out-Null
           $env:npm_config_cache = $cache
           try {
-            $archive = (npm pack --pack-destination $packageDirectory --json | ConvertFrom-Json)[0]
-            $tarball = Join-Path $packageDirectory $archive.filename
+            npm pack --pack-destination $packageDirectory
+            if ($LASTEXITCODE -ne 0) { throw "Could not build the npm tarball." }
+            $archives = @(Get-ChildItem -LiteralPath $packageDirectory -Filter "*.tgz")
+            if ($archives.Count -ne 1) { throw "Expected exactly one npm tarball, found $($archives.Count)." }
+            $tarball = $archives[0].FullName
             Push-Location -LiteralPath $project
             try {
-              & $npx --yes "--package=$tarball" anchorloop install
-              if ($LASTEXITCODE -ne 0) { throw "The packed npx launcher could not install the Codex skill." }
+              git init --quiet
+              if ($LASTEXITCODE -ne 0) { throw "Could not initialise the packed-artifact smoke repository." }
+
+              function Invoke-PackedAnchor {
+                param([Parameter(ValueFromRemainingArguments = $true)][string[]] $AnchorArgs)
+                & $npx --yes "--package=$tarball" anchorloop @AnchorArgs
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Packed AnchorLoop command failed: $($AnchorArgs -join ' ')"
+                }
+              }
+
+              Invoke-PackedAnchor install
             } finally {
               Pop-Location
             }
@@ -125,6 +152,79 @@ jobs:
             if (-not (Test-Path -LiteralPath $skill)) { throw "The npx launcher did not create SKILL.md." }
             if (-not (Select-String -LiteralPath $skill -SimpleMatch "npx --yes anchorloop@$version status" -Quiet)) {
               throw "The installed skill did not retain its pinned npx runner."
+            }
+
+            Push-Location -LiteralPath $project
+            try {
+              Invoke-PackedAnchor add --apply
+              foreach ($ignored in @(
+                "cache/example",
+                ".cache/example",
+                ".anchor/cache/example",
+                ".npm/example",
+                ".npm-cache/example",
+                "graphify-out/example",
+                "src/__pycache__/anchor.pyc",
+                ".anchor/project.lock",
+                ".anchor/transactions/example.json",
+                ".anchor/outbox/example.json"
+              )) {
+                git check-ignore --quiet --no-index -- $ignored
+                if ($LASTEXITCODE -ne 0) { throw "$ignored is not ignored after add --apply." }
+              }
+              Invoke-PackedAnchor rules approve baseline-code-quality-v1 --by "Packed smoke"
+              Invoke-PackedAnchor rules approve baseline-security-v1 --by "Packed smoke"
+              Invoke-PackedAnchor rules approve baseline-structure-v1 --by "Packed smoke"
+              Invoke-PackedAnchor start "Packed release lifecycle"
+              Invoke-PackedAnchor brief `
+                --by "Packed smoke" `
+                --outcome "Exercise the packed package end to end" `
+                --scope "Temporary packed-artifact project only" `
+                --constraints "Leave no installed skill or project-local cache" `
+                --invariant "The packed runner completes the lifecycle" `
+                --uncertainty "Cross-platform package execution"
+              Invoke-PackedAnchor plan `
+                --summary "Run the empty-project lifecycle through the packed runner." `
+                --mode STANDARD `
+                --task-type release-smoke `
+                --approach "Exercise every guarded lifecycle transition with the packed artifact." `
+                --alternative "A launcher-only smoke was rejected because it would miss state transitions." `
+                --risk "The packaged launcher can diverge from the source checkout." `
+                --verification "Complete the lifecycle and assert installation residue is absent." `
+                --human-artifact "Recorded fixture: packed lifecycle reaches verified and closes." `
+                --comprehension "Prediction: the tarball runner owns no project dependency or cache." `
+                --by "Packed smoke"
+              Invoke-PackedAnchor approve --by "Packed smoke"
+              Invoke-PackedAnchor implement
+              Invoke-PackedAnchor review
+              Invoke-PackedAnchor precommit
+              Invoke-PackedAnchor verify `
+                --by "Packed smoke" `
+                --result pass `
+                --reason "Packed runner completed the recorded lifecycle." `
+                --recall "The packed runner kept state in .anchor and removed only its skill assets."
+              $taskId = (Get-Content -Raw ".anchor/tasks/active.json" | ConvertFrom-Json).id
+              Invoke-PackedAnchor close
+              Invoke-PackedAnchor outcome `
+                --task $taskId `
+                --by "Packed smoke" `
+                --defects 0 `
+                --rollback no `
+                --corrective-refactor no `
+                --notes "No post-completion issue in the packed smoke window."
+              Invoke-PackedAnchor report --format json
+              Invoke-PackedAnchor uninstall
+            } finally {
+              Pop-Location
+            }
+
+            if (-not (Test-Path -LiteralPath (Join-Path $project ".anchor"))) {
+              throw "Packed uninstall removed the workflow state."
+            }
+            foreach ($forbidden in @(".agents", "node_modules", "cache", ".cache", ".npm", ".npm-cache", "__pycache__")) {
+              if (Test-Path -LiteralPath (Join-Path $project $forbidden)) {
+                throw "Packed lifecycle leaked $forbidden into the project."
+              }
             }
           } finally {
             Remove-Item -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue

@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+from copy import deepcopy
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator, TypeVar
 from uuid import uuid4
 
+from .command import display_command
 from .quality import run_precommit, workspace_fingerprint
+from .project_lock import ProjectLock
 from .safe_fs import AnchorError, SafeProjectFS
+from .transaction import ProjectTransaction, TransactionManager
 
 
 TASK_TRANSITIONS = {
@@ -23,17 +30,62 @@ TASK_TRANSITIONS = {
 RULE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 APPROVAL_PROVENANCE = {"audit", "interactive-tty"}
 RULE_CATEGORIES = {"code-quality", "security", "structure"}
+TASK_MODES = {"FAST", "STANDARD", "CAREFUL"}
+TASK_ID_PATTERN = re.compile(r"^al-[0-9]{8}-[a-f0-9]{6}$")
+_START_TASK_ARGUMENTS = 'start "short task title"'
+
+_ReturnT = TypeVar("_ReturnT")
+
+
+class StateRecordedError(AnchorError):
+    """A command failed after intentionally recording a durable workflow result."""
+
+
+def mutating(
+    command: str,
+    *,
+    allow_unconfigured: bool = False,
+) -> Callable[[Callable[..., _ReturnT]], Callable[..., _ReturnT]]:
+    """Run one public mutation under the project lock and redo journal."""
+
+    def decorate(function: Callable[..., _ReturnT]) -> Callable[..., _ReturnT]:
+        @wraps(function)
+        def wrapped(self: "AnchorProject", *args: Any, **kwargs: Any) -> _ReturnT:
+            with self._mutation(command, allow_unconfigured=allow_unconfigured):
+                return function(self, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+def consistent_read(command: str) -> Callable[[Callable[..., _ReturnT]], Callable[..., _ReturnT]]:
+    """Serialize a state read with replay of any prepared transaction."""
+
+    def decorate(function: Callable[..., _ReturnT]) -> Callable[..., _ReturnT]:
+        @wraps(function)
+        def wrapped(self: "AnchorProject", *args: Any, **kwargs: Any) -> _ReturnT:
+            with self._consistent_read(command):
+                return function(self, *args, **kwargs)
+
+        return wrapped
+
+    return decorate
 
 
 NEXT_ACTIONS = {
-    "briefing": "Complete the engineer brief, then run: anchor plan",
-    "planned": "Inspect the plan and required human artifact, then run: anchor approve",
-    "approved": "Implementation is authorised. Run: anchor implement",
-    "implementing": "Make the approved patch and run automated checks, then: anchor review",
-    "review_ready": "Review the evidence and run the quality gate: anchor precommit",
-    "quality_checked": "Perform the manual verification, then run: anchor verify",
-    "verified": "Close the task when the outcome is accepted: anchor close",
+    "briefing": "Complete the engineer brief, then run: {command} plan",
+    "planned": "Inspect the plan and required human artifact, then run: {command} approve",
+    "approved": "Implementation is authorised. Run: {command} implement",
+    "implementing": "Make the approved patch and run automated checks, then: {command} review",
+    "review_ready": "Review the evidence and run the quality gate: {command} precommit",
+    "quality_checked": "Perform the manual verification, then run: {command} verify",
+    "verified": "Close the task when the outcome is accepted: {command} close",
 }
+
+
+def _next_action(state: str) -> str:
+    return NEXT_ACTIONS[state].format(command=display_command())
 
 BASELINE_RULES = (
     (
@@ -64,10 +116,11 @@ class SetupPreview:
         return [
             f"Anchor {self.mode} preview for {self.root}",
             "Will create: .anchor/ state, portable protocol, baseline rule proposals, Graphify integration metadata, and .graphifyignore.",
+            "Will create or append managed cache and recovery rules in .gitignore and .anchor/.gitignore without removing existing lines.",
             "Will not: edit application source, install packages, install Graphify, or create a Git commit.",
             "Baseline rules remain inactive until an engineer approves their exact versions.",
             f"Detected project markers: {', '.join(self.detected_stack) or 'none'}.",
-            f"From {self.root}, apply with: anchor {self.mode} --apply",
+            f"From {self.root}, apply with: {display_command(f'{self.mode} --apply')}",
         ]
 
 
@@ -78,6 +131,11 @@ class AnchorProject:
         self.root = root.resolve()
         self.fs = SafeProjectFS(self.root)
         self.anchor_dir = self.root / ".anchor"
+        self._mutation_depth = 0
+        self._transaction: ProjectTransaction | None = None
+        self._transaction_manager: TransactionManager | None = None
+        self._staged_files: dict[Path, bytes | None] = {}
+        self._staged_events: list[dict[str, Any]] = []
 
     @property
     def config_path(self) -> Path:
@@ -100,10 +158,11 @@ class AnchorProject:
             raise AnchorError(f"Unknown setup mode: {mode}")
         return SetupPreview(root=self.root, mode=mode, detected_stack=tuple(self._detect_stack()))
 
+    @mutating("project.setup", allow_unconfigured=True)
     def apply_setup(self, mode: str) -> bool:
         self.preview_setup(mode)
         self.fs.ensure_directory(self.anchor_dir)
-        created = not self.fs.exists(self.config_path)
+        created = not self._exists(self.config_path)
 
         directories = (
             "protocol",
@@ -134,7 +193,7 @@ class AnchorProject:
             )
         protocol_path = self.anchor_dir / "protocol" / "anchor-protocol.json"
         protocol = {
-            "version": 2,
+            "version": 3,
             "source_of_truth": "anchor CLI and .anchor state",
             "commands": [
                 "brief",
@@ -143,6 +202,9 @@ class AnchorProject:
                 "revise",
                 *sorted(TASK_TRANSITIONS),
                 "verify",
+                "recall",
+                "outcome",
+                "report",
             ],
             "states": list(NEXT_ACTIONS),
             "approval_provenance": sorted(APPROVAL_PROVENANCE),
@@ -153,7 +215,7 @@ class AnchorProject:
             "host_adapters": ["portable-instructions", "terminal", "skills", "slash-commands", "hooks", "mcp"],
         }
         try:
-            current_protocol = self._read_json(protocol_path) if self.fs.exists(protocol_path) else {}
+            current_protocol = self._read_json(protocol_path) if self._exists(protocol_path) else {}
         except AnchorError:
             current_protocol = {}
         if current_protocol.get("version", 0) < protocol["version"]:
@@ -164,10 +226,8 @@ class AnchorProject:
             "Read .anchor/next-action.md before proposing or changing code. "
             "Never skip a recorded engineer approval. The anchor CLI is the source of truth.\n",
         )
-        self._write_text_if_missing(
-            self.anchor_dir / ".gitignore",
-            "cache/\nlogs/\ngraphify/query-history.jsonl\n",
-        )
+        self._ensure_project_gitignore()
+        self._ensure_anchor_gitignore()
         self._write_json_if_missing(
             self.anchor_dir / "graphify" / "integration.json",
             {
@@ -180,7 +240,7 @@ class AnchorProject:
         for rule_id, category, wording in BASELINE_RULES:
             proposal_path = self._rule_proposal_path(rule_id)
             approved_path = self.anchor_dir / "rules" / "approved" / proposal_path.name
-            if not self.fs.exists(proposal_path) and not self.fs.exists(approved_path):
+            if not self._exists(proposal_path) and not self._exists(approved_path):
                 self._write_json(
                     proposal_path,
                     self._rule_document(rule_id, category, wording, source="AnchorLoop baseline"),
@@ -198,118 +258,234 @@ class AnchorProject:
         return created
 
     def require_setup(self) -> None:
-        if not self.fs.exists(self.config_path):
-            raise AnchorError("Anchor is not configured here. Run: anchor add --apply")
+        if not self._exists(self.config_path):
+            raise AnchorError(
+                f"Anchor is not configured here. Run: {display_command('add --apply')}"
+            )
 
+    @consistent_read("status")
     def status(self) -> dict[str, Any]:
         self.require_setup()
         config = self._read_json(self.config_path)
-        task = self._read_json(self.active_task_path) if self.fs.exists(self.active_task_path) else None
+        task = self._read_json(self.active_task_path) if self._exists(self.active_task_path) else None
         return {
             "project": config["name"],
             "root": str(self.root),
             "ruleset_version": config.get("ruleset_version"),
             "active_task": None if task is None else {"id": task["id"], "title": task["title"], "state": task["state"]},
             "next_action": self.next_action(),
+            "pending_recalls": self._pending_recalls(),
         }
 
-    def doctor(self) -> dict[str, Any]:
-        checks: list[dict[str, str]] = []
-        try:
-            configured = self.fs.exists(self.config_path)
-        except AnchorError as error:
+    def _pending_recalls(self) -> list[dict[str, Any]]:
+        now = datetime.now(UTC)
+        recalls: list[dict[str, Any]] = []
+        closed_directory = self.anchor_dir / "tasks" / "closed"
+        for path in sorted(self.fs.glob(closed_directory, "*.json")):
+            try:
+                task = self._read_json(path)
+                comprehension = task.get("comprehension")
+                if not isinstance(comprehension, dict):
+                    continue
+                due_value = comprehension.get("recall_due_at")
+                if not due_value or comprehension.get("delayed_recall") is not None:
+                    continue
+                task_id = str(task.get("id", path.stem))
+                due_at = datetime.fromisoformat(str(due_value))
+                if due_at.tzinfo is None:
+                    raise ValueError("timezone is missing")
+                recalls.append(
+                    {
+                        "task_id": task_id,
+                        "title": task.get("title"),
+                        "due_at": due_at.isoformat(),
+                        "status": "due" if now >= due_at else "scheduled",
+                        "command": display_command(
+                            f"recall --task {task_id} --by <engineer> --response <text> --score 0..5"
+                        ),
+                    }
+                )
+            except (AnchorError, TypeError, ValueError) as error:
+                recalls.append(
+                    {
+                        "task_id": path.stem,
+                        "status": "invalid",
+                        "detail": str(error),
+                    }
+                )
+        return sorted(
+            recalls,
+            key=lambda item: (str(item.get("due_at", "")), str(item["task_id"])),
+        )
+
+    def doctor(self, *, strict: bool = False, repair: bool = False) -> dict[str, Any]:
+        """Diagnose managed state without crashing on corrupt paths or JSON."""
+
+        checks: list[dict[str, Any]] = []
+
+        def failed(name: str, error: object) -> None:
+            checks.append({"name": name, "status": "failed", "detail": str(error)})
+
+        def safe_exists(path: Path, name: str) -> bool | None:
+            try:
+                return self._exists(path)
+            except Exception as error:  # doctor must stay diagnostic on corrupt local state
+                failed(name, error)
+                return None
+
+        configured = safe_exists(self.config_path, "filesystem-boundary")
+        if configured is False:
+            anchor_exists = safe_exists(self.anchor_dir, "anchor-directory")
+            if anchor_exists:
+                try:
+                    manager = TransactionManager(self.root)
+                    health = manager.inspect()
+                    if repair and (health.pending_transactions or health.outbox_events):
+                        with ProjectLock(self.root, purpose="doctor.repair-initial-setup"):
+                            recovery = manager.recover()
+                        checks.append(
+                            {
+                                "name": "transaction-recovery",
+                                "status": "passed",
+                                "recovered": recovery.recovered_transactions,
+                                "delivered_events": recovery.delivered_events,
+                            }
+                        )
+                    elif health.pending_transactions or health.outbox_events:
+                        raise AnchorError(
+                            "Interrupted initial setup has durable recovery pending. "
+                            f"Run: {display_command('doctor --repair')}"
+                        )
+                    configured = safe_exists(self.config_path, "config-after-recovery")
+                except Exception as error:
+                    failed("transaction-health", error)
+        if configured is not True:
+            if configured is False:
+                failed(
+                    "config",
+                    f"Anchor is not configured. Run: {display_command('add --apply')}",
+                )
             return {
                 "anchor_configured": False,
                 "active_task": False,
-                "checks": [
-                    {
-                        "name": "filesystem-boundary",
-                        "status": "failed",
-                        "detail": str(error),
-                    }
-                ],
+                "strict": strict,
+                "repair": repair,
+                "checks": checks,
                 "status": "attention",
             }
-        if not configured:
-            checks.append(
-                {
-                    "name": "config",
-                    "status": "failed",
-                    "detail": "Anchor is not configured. Run: anchor add --apply",
-                }
-            )
-        else:
-            try:
-                config = self._read_json(self.config_path)
-                if config.get("schema_version") != 1:
-                    checks.append(
-                        {
-                            "name": "config",
-                            "status": "failed",
-                            "detail": "Unsupported or missing config schema version.",
-                        }
-                    )
-                else:
+
+        active_task = False
+        try:
+            lock = ProjectLock(self.root, purpose="doctor.repair") if repair else nullcontext()
+            with lock:
+                manager = TransactionManager(self.root)
+                if repair:
+                    try:
+                        recovery = manager.recover()
+                        checks.append(
+                            {
+                                "name": "transaction-recovery",
+                                "status": "passed",
+                                "recovered": recovery.recovered_transactions,
+                                "delivered_events": recovery.delivered_events,
+                            }
+                        )
+                    except Exception as error:
+                        failed("transaction-recovery", error)
+                try:
+                    health = manager.inspect()
+                    if health.pending_transactions or health.outbox_events:
+                        raise AnchorError(
+                            "Durable recovery is pending "
+                            f"({health.pending_transactions} transaction(s), {health.outbox_events} event(s)). "
+                            f"Run: {display_command('doctor --repair')}"
+                        )
+                    checks.append({"name": "transaction-health", "status": "passed"})
+                except Exception as error:
+                    failed("transaction-health", error)
+
+                try:
+                    config = self._read_json(self.config_path)
+                    if config.get("schema_version") != 1:
+                        raise AnchorError("Unsupported or missing config schema version.")
                     checks.append({"name": "config", "status": "passed"})
-            except AnchorError as error:
-                checks.append({"name": "config", "status": "failed", "detail": str(error)})
+                except Exception as error:
+                    failed("config", error)
 
-        if self.fs.exists(self.active_task_path):
-            try:
-                task = self._read_json(self.active_task_path)
-                state = task.get("state")
-                if state not in NEXT_ACTIONS:
-                    checks.append(
-                        {
-                            "name": "active-task",
-                            "status": "failed",
-                            "detail": f"Unknown task state: {state!r}",
-                        }
-                    )
-                else:
-                    checks.append({"name": "active-task", "status": "passed"})
-            except AnchorError as error:
-                checks.append({"name": "active-task", "status": "failed", "detail": str(error)})
-        else:
-            checks.append({"name": "active-task", "status": "not-run", "detail": "no active task"})
+                task_exists = safe_exists(self.active_task_path, "active-task-path")
+                active_task = task_exists is True
+                if task_exists:
+                    try:
+                        task = self._read_json(self.active_task_path)
+                        state = task.get("state")
+                        if state not in NEXT_ACTIONS:
+                            raise AnchorError(f"Unknown task state: {state!r}")
+                        checks.append({"name": "active-task", "status": "passed"})
+                    except Exception as error:
+                        failed("active-task", error)
+                elif task_exists is False:
+                    checks.append({"name": "active-task", "status": "not-run", "detail": "no active task"})
 
-        active_rules = self.anchor_dir / "rules" / "active.json"
-        if self.fs.exists(active_rules):
-            try:
-                rules = self._read_json(active_rules).get("rules", {})
-                if not isinstance(rules, dict):
-                    raise AnchorError("Active rules must be a JSON object.")
-                missing = [
-                    rule_id
-                    for rule_id in rules.values()
-                    if not self.fs.exists(self._rule_approved_path(str(rule_id)))
-                ]
-                if missing:
-                    checks.append(
-                        {
-                            "name": "active-rules",
-                            "status": "failed",
-                            "detail": f"Missing approved rule documents: {', '.join(missing)}",
-                        }
-                    )
-                else:
-                    self._active_rules_snapshot()
-                    checks.append({"name": "active-rules", "status": "passed"})
-            except AnchorError as error:
-                checks.append({"name": "active-rules", "status": "failed", "detail": str(error)})
-        else:
-            checks.append({"name": "active-rules", "status": "not-run", "detail": "no active rules"})
+                active_rules = self.anchor_dir / "rules" / "active.json"
+                rules_exist = safe_exists(active_rules, "active-rules-path")
+                if rules_exist:
+                    try:
+                        rules = self._read_json(active_rules).get("rules", {})
+                        if not isinstance(rules, dict):
+                            raise AnchorError("Active rules must be a JSON object.")
+                        missing = [
+                            str(rule_id)
+                            for rule_id in rules.values()
+                            if safe_exists(self._rule_approved_path(str(rule_id)), "approved-rule-path") is False
+                        ]
+                        if missing:
+                            raise AnchorError(f"Missing approved rule documents: {', '.join(missing)}")
+                        self._active_rules_snapshot()
+                        checks.append({"name": "active-rules", "status": "passed"})
+                    except Exception as error:
+                        failed("active-rules", error)
+                elif rules_exist is False:
+                    checks.append({"name": "active-rules", "status": "not-run", "detail": "no active rules"})
+
+                if strict:
+                    strict_files = {
+                        "protocol": self.anchor_dir / "protocol" / "anchor-protocol.json",
+                        "next-action": self.next_action_path,
+                        "event-log": self.anchor_dir / "events.jsonl",
+                    }
+                    for name, path in strict_files.items():
+                        exists = safe_exists(path, f"strict-{name}")
+                        if exists is False:
+                            failed(f"strict-{name}", f"Required managed file is missing: {path}")
+                        elif exists:
+                            try:
+                                if name == "protocol":
+                                    protocol = self._read_json(path)
+                                    if not isinstance(protocol.get("version"), int):
+                                        raise AnchorError("Protocol version is missing or invalid.")
+                                elif name == "next-action" and not self._read_text(path).strip():
+                                    raise AnchorError("Next action is empty.")
+                                elif name == "event-log":
+                                    manager._read_event_log(repair_torn_tail=False)
+                                checks.append({"name": f"strict-{name}", "status": "passed"})
+                            except Exception as error:
+                                failed(f"strict-{name}", error)
+        except Exception as error:
+            failed("project-lock", error)
 
         return {
-            "anchor_configured": configured,
-            "active_task": self.fs.exists(self.active_task_path),
+            "anchor_configured": True,
+            "active_task": active_task,
+            "strict": strict,
+            "repair": repair,
             "checks": checks,
             "status": "ok" if all(check["status"] != "failed" for check in checks) else "attention",
         }
 
+    @mutating("task.start")
     def start_task(self, title: str) -> dict[str, Any]:
         self.require_setup()
-        if self.fs.exists(self.active_task_path):
+        if self._exists(self.active_task_path):
             task = self._read_json(self.active_task_path)
             raise AnchorError(f"Task {task['id']} is already active in state {task['state']}.")
         normalized_title = title.strip()
@@ -336,11 +512,12 @@ class AnchorProject:
         self._write_next_action(
             "Reply with this engineer brief before planning:\n"
             "Outcome:\nScope / non-goals:\nConstraints:\nInvariant or acceptance case:\nMain uncertainty:\n"
-            "Record it with: anchor brief --by <engineer> --outcome <text> --scope <text> "
+            f"Record it with: {display_command('brief')} --by <engineer> --outcome <text> --scope <text> "
             "--constraints <text> --invariant <text> --uncertainty <text>\n"
         )
         return task
 
+    @mutating("task.brief")
     def record_brief(self, *, by: str, values: dict[str, str]) -> dict[str, Any]:
         task = self._task_in_state("briefing", "brief")
         engineer = self._required_text(by, "Engineer name")
@@ -355,10 +532,29 @@ class AnchorProject:
         }
         self._append_task_event(task, "task.brief.recorded")
         self._write_json(self.active_task_path, task)
-        self._write_next_action("Brief recorded. Prepare a concrete plan, then run: anchor plan --summary <text>\n")
+        self._write_next_action(
+            "Brief recorded. Prepare the engineer-owned plan fields, then inspect: "
+            f"{display_command('plan --help')}\n"
+        )
         return task
 
-    def plan_task(self, summary: str) -> dict[str, Any]:
+    @mutating("task.plan")
+    def plan_task(
+        self,
+        summary: str,
+        *,
+        mode: str = "AUTO",
+        task_type: str = "general",
+        approach: str | None = None,
+        rejected_alternative: str | None = None,
+        primary_risk: str | None = None,
+        verification_strategy: str | None = None,
+        human_artifact: str | None = None,
+        comprehension: str | None = None,
+        rollback_mitigation: str | None = None,
+        mode_override_reason: str | None = None,
+        by: str | None = None,
+    ) -> dict[str, Any]:
         task = self._task_in_states({"briefing", "planned"}, "plan")
         brief_record = task.get("brief_record")
         if (
@@ -367,17 +563,123 @@ class AnchorProject:
             or brief_record.get("brief_digest") != self._document_digest(task["brief"])
         ):
             raise AnchorError("Record the complete engineer brief before planning.")
+        normalized_summary = self._required_text(summary, "Plan summary")
+        normalized_task_type = self._required_text(task_type, "Task type")
+        requested_mode = mode.strip().upper()
+        if requested_mode not in {*TASK_MODES, "AUTO"}:
+            raise AnchorError("Task mode must be one of: AUTO, FAST, STANDARD, CAREFUL.")
+        recommended_mode, recommendation_reason = self._recommended_mode(normalized_task_type, task["brief"])
+        normalized_mode = recommended_mode if requested_mode == "AUTO" else requested_mode
+        ownership_values = {
+            "approach": approach,
+            "rejected_alternative": rejected_alternative,
+            "primary_risk": primary_risk,
+            "verification_strategy": verification_strategy,
+            "human_artifact": human_artifact,
+            "comprehension": comprehension,
+            "by": by,
+        }
+        if normalized_mode == "CAREFUL":
+            ownership_values["rollback_mitigation"] = rollback_mitigation
+        if normalized_mode in {"STANDARD", "CAREFUL"}:
+            missing = [name for name, value in ownership_values.items() if not isinstance(value, str) or not value.strip()]
+            if missing:
+                raise AnchorError(
+                    f"{normalized_mode} planning requires engineer-owned fields: {', '.join(missing)}."
+                )
+
+        if self._mode_rank(normalized_mode) < self._mode_rank(recommended_mode):
+            if not isinstance(mode_override_reason, str) or not mode_override_reason.strip():
+                raise AnchorError(
+                    f"This task recommends {recommended_mode} mode ({recommendation_reason}). "
+                    "A lower mode requires --mode-override-reason."
+                )
+        owner = self._required_text(by or brief_record["by"], "Engineer name")
+        recorded_at = self._timestamp()
+        effective_approach = self._required_text(approach or normalized_summary, "Approach")
+        effective_alternative = self._required_text(
+            rejected_alternative or "No material alternative recorded for this explicitly selected FAST task.",
+            "Rejected alternative",
+        )
+        effective_risk = self._required_text(primary_risk or task["brief"]["uncertainty"], "Primary risk")
+        effective_verification = self._required_text(
+            verification_strategy or task["brief"]["invariant"],
+            "Verification strategy",
+        )
+        effective_artifact = (
+            self._required_text(human_artifact, "Human artifact")
+            if human_artifact is not None
+            else None
+        )
+        effective_comprehension = (
+            self._required_text(comprehension, "Comprehension checksum")
+            if comprehension is not None
+            else None
+        )
         if "plan" in task:
             task.setdefault("plan_history", []).append(task["plan"])
-        task["plan"] = {"summary": self._required_text(summary, "Plan summary"), "at": self._timestamp()}
+        task["mode"] = normalized_mode
+        task["task_type"] = normalized_task_type
+        task["plan"] = {
+            "summary": normalized_summary,
+            "approach": effective_approach,
+            "rejected_alternative": effective_alternative,
+            "primary_risk": effective_risk,
+            "verification_strategy": effective_verification,
+            "rollback_mitigation": (
+                self._required_text(rollback_mitigation, "Rollback or mitigation")
+                if rollback_mitigation is not None
+                else None
+            ),
+            "mode_recommendation": {
+                "mode": recommended_mode,
+                "requested": requested_mode,
+                "reason": recommendation_reason,
+                "override_reason": mode_override_reason.strip() if isinstance(mode_override_reason, str) else None,
+            },
+            "at": recorded_at,
+        }
+        task["human_artifact"] = (
+            {
+                "content": effective_artifact,
+                "by": owner,
+                "at": recorded_at,
+                "source": "plan-input",
+            }
+            if effective_artifact is not None
+            else None
+        )
+        recall_due = (
+            (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+            if normalized_mode == "CAREFUL"
+            else None
+        )
+        task["comprehension"] = {
+            "baseline": (
+                {
+                    "statement": effective_comprehension,
+                    "by": owner,
+                    "at": recorded_at,
+                }
+                if effective_comprehension is not None
+                else None
+            ),
+            "recall_due_at": recall_due,
+        }
+        metrics = task.setdefault("metrics", {})
+        metrics["plan_recorded_at"] = recorded_at
+        metrics["mode"] = normalized_mode
+        metrics["task_type"] = normalized_task_type
         return self._advance_task(task, "plan", "planned")
 
+    @mutating("task.approve")
     def approve_task(
         self,
         by: str,
         *,
         provenance: str = "audit",
         interactive_confirmed: bool = False,
+        expected_subject_digest: str | None = None,
     ) -> dict[str, Any]:
         task = self._task_in_state("planned", "approve")
         if "plan" not in task:
@@ -385,14 +687,38 @@ class AnchorProject:
         snapshot = self._active_rules_snapshot()
         task["ruleset"] = snapshot
         approval_subject = self._task_approval_subject(task)
+        subject_digest = self._document_digest(approval_subject)
+        if provenance == "interactive-tty" and expected_subject_digest != subject_digest:
+            raise AnchorError("The approval subject changed after it was displayed; review and confirm it again.")
         task["approval"] = {
             **self._approval_record(by, provenance, interactive_confirmed=interactive_confirmed),
             "plan_summary": task["plan"]["summary"],
             **self._task_approval_digests(approval_subject),
             "ruleset_version": snapshot["version"],
         }
+        if provenance == "interactive-tty":
+            task["approval"]["confirmed_subject_digest"] = subject_digest
         return self._advance_task(task, "approve", "approved")
 
+    @consistent_read("task.approval-preview")
+    def task_approval_preview(self) -> dict[str, Any]:
+        """Return the exact task subject an interactive engineer must confirm."""
+
+        task = deepcopy(self._task_in_state("planned", "approve"))
+        if "plan" not in task:
+            raise AnchorError("A recorded plan is required before approval.")
+        task["ruleset"] = self._active_rules_snapshot()
+        subject = self._task_approval_subject(task)
+        return {
+            "task_id": task["id"],
+            "title": task["title"],
+            "mode": task.get("mode", "FAST"),
+            "plan_summary": task["plan"]["summary"],
+            "subject_digest": self._document_digest(subject),
+            "ruleset_version": task["ruleset"]["version"],
+        }
+
+    @mutating("task.verify")
     def verify_task(
         self,
         *,
@@ -401,27 +727,289 @@ class AnchorProject:
         reason: str,
         provenance: str = "audit",
         interactive_confirmed: bool = False,
+        recall: str | None = None,
+        agent_turns: int | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        active_minutes: float | None = None,
+        agent_provider: str | None = None,
+        agent_model: str | None = None,
+        expected_subject_digest: str | None = None,
     ) -> dict[str, Any]:
         task = self._task_in_state("quality_checked", "verify")
         self._ensure_approval_matches_task(task)
         self._ensure_quality_matches_workspace(task)
+        mode = str(task.get("mode", "FAST")).upper()
+        if mode in {"STANDARD", "CAREFUL"} and (not isinstance(recall, str) or not recall.strip()):
+            raise AnchorError(f"{mode} verification requires an engineer recall statement.")
+        if recall is not None:
+            task.setdefault("comprehension", {})["verification_check"] = {
+                "statement": self._required_text(recall, "Recall statement"),
+                "by": self._required_text(by, "Engineer name"),
+                "at": self._timestamp(),
+            }
+        reported_metrics = {
+            "agent_turns": agent_turns,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "active_minutes": active_minutes,
+        }
+        for name, value in reported_metrics.items():
+            if value is not None and (not math.isfinite(float(value)) or value < 0):
+                raise AnchorError(f"Metric {name} must be a finite non-negative number.")
+        if (agent_provider is None) != (agent_model is None):
+            raise AnchorError("Agent provider and model must be reported together.")
+        agent_identity: dict[str, str] = {}
+        if agent_provider is not None and agent_model is not None:
+            agent_identity = {
+                "agent_provider": self._required_text(agent_provider, "Agent provider"),
+                "agent_model": self._required_text(agent_model, "Agent model"),
+            }
+        if any(value is not None for value in reported_metrics.values()) or agent_identity:
+            task.setdefault("metrics", {}).update(
+                {
+                    **{name: value for name, value in reported_metrics.items() if value is not None},
+                    **agent_identity,
+                    "provenance": "reported-at-verification",
+                }
+            )
+        subject_digest = self._verification_subject_digest(
+            task,
+            result=result,
+            reason=reason,
+            recall=recall,
+        )
+        if provenance == "interactive-tty" and expected_subject_digest != subject_digest:
+            raise AnchorError("The verification subject changed after it was displayed; review and confirm it again.")
         verification = {
             **self._approval_record(by, provenance, interactive_confirmed=interactive_confirmed),
             "result": result,
             "reason": self._required_text(reason, "Verification reason"),
         }
+        if provenance == "interactive-tty":
+            verification["confirmed_subject_digest"] = subject_digest
         task["verification"] = verification
         if result == "fail":
             self._append_task_event(task, "task.verify.failed")
             self._write_json(self.active_task_path, task)
             self._write_next_action(
                 "Verification failed. Return to the smallest valid revision with one of:\n"
-                "anchor revise --target implement --reason <text>\n"
-                "anchor revise --target plan --reason <text>\n"
+                f"{display_command('revise --target implement --reason <text>')}\n"
+                f"{display_command('revise --target plan --reason <text>')}\n"
             )
             return task
         return self._advance_task(task, "verify", "verified")
 
+    @consistent_read("task.verification-preview")
+    def verification_preview(self, *, result: str, reason: str, recall: str | None) -> dict[str, Any]:
+        task = self._task_in_state("quality_checked", "verify")
+        self._ensure_approval_matches_task(task)
+        self._ensure_quality_matches_workspace(task)
+        digest = self._verification_subject_digest(task, result=result, reason=reason, recall=recall)
+        return {
+            "task_id": task["id"],
+            "title": task["title"],
+            "result": result,
+            "reason": self._required_text(reason, "Verification reason"),
+            "subject_digest": digest,
+        }
+
+    @mutating("task.delayed-recall")
+    def record_delayed_recall(
+        self,
+        *,
+        task_id: str,
+        by: str,
+        response: str,
+        score: int,
+    ) -> dict[str, Any]:
+        if not TASK_ID_PATTERN.fullmatch(task_id):
+            raise AnchorError("Invalid AnchorLoop task ID.")
+        if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 5:
+            raise AnchorError("Delayed recall score must be an integer from 0 to 5.")
+        path = self.anchor_dir / "tasks" / "closed" / f"{task_id}.json"
+        if not self._exists(path):
+            raise AnchorError(f"Closed task '{task_id}' does not exist.")
+        task = self._read_json(path)
+        if task.get("id") != task_id or task.get("state") != "closed":
+            raise AnchorError("Delayed recall requires an intact closed task record.")
+        approval = task.get("approval")
+        expected_approval = self._task_approval_digests(self._task_approval_subject(task))
+        if (
+            not isinstance(approval, dict)
+            or approval.get("task_digest") != expected_approval["task_digest"]
+        ):
+            raise AnchorError(
+                "Closed task ownership or recall policy changed after approval; delayed recall is blocked."
+            )
+        comprehension = task.get("comprehension")
+        if not isinstance(comprehension, dict) or not comprehension.get("recall_due_at"):
+            raise AnchorError("This task has no scheduled delayed recall.")
+        if comprehension.get("delayed_recall") is not None:
+            raise AnchorError("Delayed recall is already recorded for this task.")
+        try:
+            due_at = datetime.fromisoformat(str(comprehension["recall_due_at"]))
+        except ValueError as error:
+            raise AnchorError(
+                "Delayed recall schedule is invalid. Run: "
+                f"{display_command('doctor --strict')}"
+            ) from error
+        now = datetime.now(UTC)
+        if due_at.tzinfo is None:
+            raise AnchorError("Delayed recall schedule must include a timezone.")
+        if now < due_at:
+            raise AnchorError(f"Delayed recall is not due until {due_at.isoformat()}.")
+        comprehension["delayed_recall"] = {
+            "statement": self._required_text(response, "Delayed recall response"),
+            "score": score,
+            "by": self._required_text(by, "Engineer name"),
+            "due_at": due_at.isoformat(),
+            "recorded_at": now.isoformat(),
+            "delay_seconds": max(0.0, (now - due_at).total_seconds()),
+        }
+        task.setdefault("metrics", {})["delayed_recall_score"] = score
+        self._append_task_event(task, "task.delayed-recall.recorded")
+        self._write_json(path, task)
+        return task
+
+    @mutating("task.outcome")
+    def record_post_completion_outcome(
+        self,
+        *,
+        task_id: str,
+        by: str,
+        defects_found: int,
+        rollback: bool,
+        corrective_refactor: bool,
+        notes: str,
+    ) -> dict[str, Any]:
+        if not TASK_ID_PATTERN.fullmatch(task_id):
+            raise AnchorError("Invalid AnchorLoop task ID.")
+        if (
+            not isinstance(defects_found, int)
+            or isinstance(defects_found, bool)
+            or defects_found < 0
+        ):
+            raise AnchorError("Post-completion defects must be a non-negative integer.")
+        if not isinstance(rollback, bool) or not isinstance(corrective_refactor, bool):
+            raise AnchorError("Rollback and corrective-refactor outcomes must be boolean.")
+        path = self.anchor_dir / "tasks" / "closed" / f"{task_id}.json"
+        if not self._exists(path):
+            raise AnchorError(f"Closed task '{task_id}' does not exist.")
+        task = self._read_json(path)
+        if task.get("id") != task_id or task.get("state") != "closed":
+            raise AnchorError("Post-completion outcome requires an intact closed task record.")
+        approval = task.get("approval")
+        expected_approval = self._task_approval_digests(self._task_approval_subject(task))
+        if (
+            not isinstance(approval, dict)
+            or approval.get("task_digest") != expected_approval["task_digest"]
+        ):
+            raise AnchorError(
+                "Closed task ownership changed after approval; post-completion outcome is blocked."
+            )
+        record = {
+            "at": self._timestamp(),
+            "by": self._required_text(by, "Engineer name"),
+            "defects_found": defects_found,
+            "rollback": rollback,
+            "corrective_refactor": corrective_refactor,
+            "notes": self._required_text(notes, "Post-completion notes"),
+            "provenance": "reported-post-completion",
+        }
+        task.setdefault("post_completion_outcomes", []).append(record)
+        task.setdefault("metrics", {})["latest_post_completion_outcome"] = {
+            key: record[key]
+            for key in ("at", "defects_found", "rollback", "corrective_refactor")
+        }
+        self._append_task_event(task, "task.outcome.recorded")
+        self._write_json(path, task)
+        return task
+
+    @consistent_read("report")
+    def experiment_report(self) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+        closed_directory = self.anchor_dir / "tasks" / "closed"
+        for path in sorted(self.fs.glob(closed_directory, "*.json")):
+            task = self._read_json(path)
+            if task.get("state") != "closed" or task.get("id") != path.stem:
+                raise AnchorError(f"Closed task record is inconsistent: {path}")
+            metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
+            comprehension = (
+                task.get("comprehension")
+                if isinstance(task.get("comprehension"), dict)
+                else {}
+            )
+            delayed = (
+                comprehension.get("delayed_recall")
+                if isinstance(comprehension.get("delayed_recall"), dict)
+                else {}
+            )
+            outcomes = task.get("post_completion_outcomes")
+            if not isinstance(outcomes, list):
+                outcomes = []
+            latest_outcome = outcomes[-1] if outcomes and isinstance(outcomes[-1], dict) else {}
+            input_tokens = metrics.get("input_tokens")
+            output_tokens = metrics.get("output_tokens")
+            total_tokens = (
+                input_tokens + output_tokens
+                if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+                else None
+            )
+            rows.append(
+                {
+                    "task_id": task["id"],
+                    "title": task.get("title"),
+                    "mode": task.get("mode"),
+                    "task_type": task.get("task_type"),
+                    "verification_result": task.get("verification", {}).get("result"),
+                    "wall_seconds": metrics.get("wall_seconds"),
+                    "active_minutes": metrics.get("active_minutes"),
+                    "agent_turns": metrics.get("agent_turns"),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens,
+                    "agent_provider": metrics.get("agent_provider"),
+                    "agent_model": metrics.get("agent_model"),
+                    "delayed_recall_score": delayed.get("score"),
+                    "outcome_observations": len(outcomes),
+                    "defects_found": latest_outcome.get("defects_found"),
+                    "rollback": latest_outcome.get("rollback"),
+                    "corrective_refactor": latest_outcome.get("corrective_refactor"),
+                    "outcome_recorded_at": latest_outcome.get("at"),
+                }
+            )
+        recall_scores = [
+            row["delayed_recall_score"]
+            for row in rows
+            if isinstance(row.get("delayed_recall_score"), int)
+        ]
+        wall_times = [
+            float(row["wall_seconds"])
+            for row in rows
+            if isinstance(row.get("wall_seconds"), (int, float))
+            and math.isfinite(float(row["wall_seconds"]))
+        ]
+        return {
+            "schema_version": 1,
+            "generated_at": self._timestamp(),
+            "summary": {
+                "closed_tasks": len(rows),
+                "tasks_with_delayed_recall": len(recall_scores),
+                "tasks_with_outcome_observation": sum(
+                    int(row["outcome_observations"] > 0) for row in rows
+                ),
+                "average_delayed_recall_score": (
+                    sum(recall_scores) / len(recall_scores) if recall_scores else None
+                ),
+                "average_wall_seconds": (
+                    sum(wall_times) / len(wall_times) if wall_times else None
+                ),
+            },
+            "tasks": rows,
+        }
+
+    @mutating("task.revise")
     def revise_task(self, *, target: str, reason: str) -> dict[str, Any]:
         task = self._task_in_states({"implementing", "review_ready", "quality_checked"}, "revise")
         self._ensure_approval_matches_task(task)
@@ -446,7 +1034,9 @@ class AnchorProject:
             task["state"] = "planned"
             self._append_task_event(task, "task.revise.plan")
             self._write_json(self.active_task_path, task)
-            self._write_next_action("Revise the plan, then run: anchor plan --summary <text>\n")
+            self._write_next_action(
+                f"Revise the engineer-owned plan fields, then inspect: {display_command('plan --help')}\n"
+            )
             return task
 
         task.setdefault("revisions", []).append(revision)
@@ -454,19 +1044,22 @@ class AnchorProject:
         task["state"] = "implementing"
         self._append_task_event(task, "task.revise.implement")
         self._write_json(self.active_task_path, task)
-        self._write_next_action(f"{NEXT_ACTIONS['implementing']}\n")
+        self._write_next_action(f"{_next_action('implementing')}\n")
         return task
 
+    @mutating("task.transition")
     def transition(self, action: str) -> dict[str, Any]:
         self.require_setup()
-        if not self.fs.exists(self.active_task_path):
-            raise AnchorError("No active task. Run: anchor start \"short task title\"")
+        if not self._exists(self.active_task_path):
+            raise AnchorError(
+                f"No active task. Run: {display_command(_START_TASK_ARGUMENTS)}"
+            )
         task = self._read_json(self.active_task_path)
         state = task["state"]
         expected = TASK_TRANSITIONS.get(action, {})
         if state not in expected:
             allowed = ", ".join(name for name, states in TASK_TRANSITIONS.items() if state in states)
-            detail = f" Allowed next command: anchor {allowed}." if allowed else ""
+            detail = f" Allowed next command: {display_command(allowed)}." if allowed else ""
             raise AnchorError(f"Cannot run '{action}' while task is '{state}'.{detail}")
         if action in {"implement", "review", "precommit", "close"}:
             self._ensure_approval_matches_task(task)
@@ -475,22 +1068,49 @@ class AnchorProject:
             if verification.get("result") not in {"pass", "partial", "not-applicable"}:
                 raise AnchorError("A recorded engineer verification is required before close.")
             self._ensure_quality_matches_workspace(task)
+            task.setdefault("metrics", {})["closed_at"] = self._timestamp()
+            try:
+                created_at = datetime.fromisoformat(task["created_at"])
+                closed_at = datetime.fromisoformat(task["metrics"]["closed_at"])
+                task["metrics"]["wall_seconds"] = max(0.0, (closed_at - created_at).total_seconds())
+            except (KeyError, TypeError, ValueError):
+                task["metrics"]["wall_seconds"] = None
         task["state"] = expected[state]
         self._append_task_event(task, f"task.{action}")
         if action == "close":
             closed_path = self.anchor_dir / "tasks" / "closed" / f"{task['id']}.json"
             self._write_json(closed_path, task)
-            self.fs.unlink(self.active_task_path)
-            self._write_next_action("No active task. Start the next one with: anchor start \"short task title\"\n")
+            self._unlink(self.active_task_path)
+            recall_due_at = (
+                task.get("comprehension", {}).get("recall_due_at")
+                if isinstance(task.get("comprehension"), dict)
+                else None
+            )
+            recall_guidance = ""
+            if recall_due_at:
+                recall_command = display_command(
+                    f"recall --task {task['id']} --by <engineer> --response <text> --score 0..5"
+                )
+                recall_guidance = (
+                    f"Delayed recall is scheduled for {recall_due_at}. When due, run: "
+                    f"{recall_command}\n"
+                )
+            self._write_next_action(
+                recall_guidance
+                + f"No active task. Start the next one with: {display_command(_START_TASK_ARGUMENTS)}\n"
+            )
             return task
         self._write_json(self.active_task_path, task)
-        self._write_next_action(f"{NEXT_ACTIONS[task['state']]}\n")
+        self._write_next_action(f"{_next_action(task['state'])}\n")
         return task
 
+    @mutating("task.precommit")
     def precommit(self) -> dict[str, Any]:
         self.require_setup()
-        if not self.fs.exists(self.active_task_path):
-            raise AnchorError("No active task. Run: anchor start \"short task title\"")
+        if not self._exists(self.active_task_path):
+            raise AnchorError(
+                f"No active task. Run: {display_command(_START_TASK_ARGUMENTS)}"
+            )
         task = self._read_json(self.active_task_path)
         if task["state"] != "review_ready":
             raise AnchorError(f"Cannot run 'precommit' while task is '{task['state']}'.")
@@ -501,9 +1121,10 @@ class AnchorProject:
         self._write_json(self.active_task_path, task)
         if quality["status"] == "blocked":
             locations = ", ".join(finding["location"] for finding in quality["findings"])
-            raise AnchorError(f"Pre-commit is blocked. Fix findings before verification: {locations}")
+            raise StateRecordedError(f"Pre-commit is blocked. Fix findings before verification: {locations}")
         return self.transition("precommit")
 
+    @mutating("rule.propose")
     def propose_rule(self, category: str, wording: str) -> dict[str, Any]:
         self.require_setup()
         if category not in RULE_CATEGORIES:
@@ -517,6 +1138,7 @@ class AnchorProject:
         self._append_event({"type": "rule.proposed", "rule_id": rule_id, "at": self._timestamp()})
         return document
 
+    @mutating("rule.approve")
     def approve_rule(
         self,
         rule_id: str,
@@ -524,19 +1146,25 @@ class AnchorProject:
         by: str,
         provenance: str = "audit",
         interactive_confirmed: bool = False,
+        expected_subject_digest: str | None = None,
     ) -> dict[str, Any]:
         self.require_setup()
         proposal_path = self._rule_proposal_path(rule_id)
-        if not self.fs.exists(proposal_path):
+        if not self._exists(proposal_path):
             raise AnchorError(f"Rule proposal '{rule_id}' does not exist.")
         rule = self._read_json(proposal_path)
         self._validate_rule_document(rule, expected_id=rule_id, expected_status="proposed")
+        subject_digest = self._document_digest(rule)
+        if provenance == "interactive-tty" and expected_subject_digest != subject_digest:
+            raise AnchorError("The rule proposal changed after it was displayed; review and confirm it again.")
         rule["status"] = "approved"
         rule["approval"] = self._approval_record(
             by,
             provenance,
             interactive_confirmed=interactive_confirmed,
         )
+        if provenance == "interactive-tty":
+            rule["approval"]["confirmed_subject_digest"] = subject_digest
         rule["approved_at"] = rule["approval"]["at"]
         rule["approved_document_digest"] = self._approved_rule_document_digest(rule)
         approved_path = self.anchor_dir / "rules" / "approved" / proposal_path.name
@@ -546,10 +1174,26 @@ class AnchorProject:
         config = self._read_json(self.config_path)
         self._refresh_config_ruleset_metadata(config)
         self._write_json(self.config_path, config)
-        self.fs.unlink(proposal_path)
+        self._unlink(proposal_path)
         self._append_event({"type": "rule.approved", "rule_id": rule_id, "at": self._timestamp()})
         return rule
 
+    @consistent_read("rule.approval-preview")
+    def rule_approval_preview(self, rule_id: str) -> dict[str, Any]:
+        self.require_setup()
+        proposal_path = self._rule_proposal_path(rule_id)
+        if not self._exists(proposal_path):
+            raise AnchorError(f"Rule proposal '{rule_id}' does not exist.")
+        rule = self._read_json(proposal_path)
+        self._validate_rule_document(rule, expected_id=rule_id, expected_status="proposed")
+        return {
+            "rule_id": rule_id,
+            "category": rule["category"],
+            "wording": rule["wording"],
+            "subject_digest": self._document_digest(rule),
+        }
+
+    @mutating("rule.supersede")
     def supersede_rule(
         self,
         *,
@@ -559,6 +1203,7 @@ class AnchorProject:
         reason: str,
         provenance: str = "audit",
         interactive_confirmed: bool = False,
+        expected_subject_digest: str | None = None,
     ) -> dict[str, Any]:
         self.require_setup()
         self._validate_rule_id(old_rule_id)
@@ -567,7 +1212,7 @@ class AnchorProject:
             raise AnchorError("A rule cannot supersede itself.")
         old_rule_path = self._rule_approved_path(old_rule_id)
         new_rule_path = self._rule_approved_path(new_rule_id)
-        if not self.fs.exists(old_rule_path) or not self.fs.exists(new_rule_path):
+        if not self._exists(old_rule_path) or not self._exists(new_rule_path):
             raise AnchorError("Both rules must be approved before one can supersede the other.")
         old_rule = self._read_json(old_rule_path)
         new_rule = self._read_json(new_rule_path)
@@ -584,15 +1229,25 @@ class AnchorProject:
             raise AnchorError("Only rules in the same category can supersede each other.")
 
         active_path = self.anchor_dir / "rules" / "active.json"
-        active = self._read_json(active_path) if self.fs.exists(active_path) else {"version": 1, "rules": {}}
+        active = self._read_json(active_path) if self._exists(active_path) else {"version": 1, "rules": {}}
         category = old_rule["category"]
         if active["rules"].get(category) != old_rule_id:
             raise AnchorError(f"Rule '{old_rule_id}' is not the active {category} rule.")
+        subject_digest = self._rule_supersession_subject_digest(
+            old_rule,
+            new_rule,
+            active,
+            reason=reason,
+        )
+        if provenance == "interactive-tty" and expected_subject_digest != subject_digest:
+            raise AnchorError("The rule supersession subject changed after it was displayed; review and confirm it again.")
         approval = self._approval_record(
             by,
             provenance,
             interactive_confirmed=interactive_confirmed,
         )
+        if provenance == "interactive-tty":
+            approval["confirmed_subject_digest"] = subject_digest
         supersession = {
             "from": old_rule_id,
             "to": new_rule_id,
@@ -610,6 +1265,28 @@ class AnchorProject:
         self._append_event({"type": "rule.superseded", **supersession})
         return {"active_rule": new_rule_id, "category": category, "supersession": supersession}
 
+    @consistent_read("rule.supersession-preview")
+    def rule_supersession_preview(
+        self,
+        *,
+        old_rule_id: str,
+        new_rule_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        self.require_setup()
+        old_rule = self._read_json(self._rule_approved_path(old_rule_id))
+        new_rule = self._read_json(self._rule_approved_path(new_rule_id))
+        active_path = self.anchor_dir / "rules" / "active.json"
+        active = self._read_json(active_path) if self._exists(active_path) else {"version": 1, "rules": {}}
+        digest = self._rule_supersession_subject_digest(old_rule, new_rule, active, reason=reason)
+        return {
+            "old_rule_id": old_rule_id,
+            "new_rule_id": new_rule_id,
+            "reason": self._required_text(reason, "Supersession reason"),
+            "subject_digest": digest,
+        }
+
+    @consistent_read("rules.list")
     def list_rules(self) -> list[dict[str, Any]]:
         self.require_setup()
         rules = []
@@ -623,6 +1300,7 @@ class AnchorProject:
             rules.append(rule)
         return rules
 
+    @consistent_read("agent.detect")
     def detect_agent_capabilities(self) -> dict[str, Any]:
         self.require_setup()
         indicators = {
@@ -645,6 +1323,7 @@ class AnchorProject:
         }
         return result
 
+    @consistent_read("agent.status")
     def agent_status(self) -> dict[str, Any]:
         result = self.detect_agent_capabilities()
         adapters = sorted(self.fs.glob(self.anchor_dir / "agents" / "adapters", "*.json"))
@@ -658,9 +1337,10 @@ class AnchorProject:
             "Anchor agent setup preview for portable",
             "Will create: .anchor/agents/adapters/portable.json with command and protocol metadata.",
             "Will not: install a host plugin, modify host configuration, or change application source.",
-            f"From {self.root}, apply with: anchor agent setup portable --apply",
+            f"From {self.root}, apply with: {display_command('agent setup portable --apply')}",
         ]
 
+    @mutating("agent.setup")
     def setup_agent(self, host: str) -> dict[str, Any]:
         self.require_setup()
         self.preview_agent_setup(host)
@@ -689,7 +1369,7 @@ class AnchorProject:
 
     def _active_rules_with(self, rule: dict[str, Any]) -> dict[str, Any]:
         path = self.anchor_dir / "rules" / "active.json"
-        active = self._read_json(path) if self.fs.exists(path) else {"version": 1, "rules": {}}
+        active = self._read_json(path) if self._exists(path) else {"version": 1, "rules": {}}
         existing = active["rules"].get(rule["category"])
         if not existing:
             active["rules"][rule["category"]] = rule["id"]
@@ -697,12 +1377,12 @@ class AnchorProject:
 
     def _active_rules_snapshot(self) -> dict[str, Any]:
         path = self.anchor_dir / "rules" / "active.json"
-        active = self._read_json(path) if self.fs.exists(path) else {"version": 1, "rules": {}}
+        active = self._read_json(path) if self._exists(path) else {"version": 1, "rules": {}}
         rules = dict(active["rules"])
         documents = {}
         for category, rule_id in sorted(rules.items()):
             approved_path = self._rule_approved_path(rule_id)
-            if not self.fs.exists(approved_path):
+            if not self._exists(approved_path):
                 raise AnchorError(f"Active rule '{rule_id}' is missing its approved document.")
             rule = self._read_json(approved_path)
             self._validate_rule_document(rule, expected_id=rule_id, expected_status="approved")
@@ -738,18 +1418,23 @@ class AnchorProject:
         return f"ruleset-{hashlib.sha256(encoded).hexdigest()[:12]}"
 
     def _next_action_for_existing_project(self) -> str:
-        if self.fs.exists(self.active_task_path):
+        if self._exists(self.active_task_path):
             task = self._read_json(self.active_task_path)
-            return f"Existing task: {task['title']} ({task['state']}).\n{NEXT_ACTIONS[task['state']]}\n"
-        return "Anchor is already configured. Start a task with: anchor start \"short task title\"\n"
+            return f"Existing task: {task['title']} ({task['state']}).\n{_next_action(task['state'])}\n"
+        return (
+            "Anchor is already configured. Start a task with: "
+            f"{display_command(_START_TASK_ARGUMENTS)}\n"
+        )
 
     def _task_in_state(self, state: str, action: str) -> dict[str, Any]:
         return self._task_in_states({state}, action)
 
     def _task_in_states(self, states: set[str], action: str) -> dict[str, Any]:
         self.require_setup()
-        if not self.fs.exists(self.active_task_path):
-            raise AnchorError("No active task. Run: anchor start \"short task title\"")
+        if not self._exists(self.active_task_path):
+            raise AnchorError(
+                f"No active task. Run: {display_command(_START_TASK_ARGUMENTS)}"
+            )
         task = self._read_json(self.active_task_path)
         if task["state"] not in states:
             raise AnchorError(f"Cannot run '{action}' while task is '{task['state']}'.")
@@ -759,7 +1444,7 @@ class AnchorProject:
         task["state"] = state
         self._append_task_event(task, f"task.{action}")
         self._write_json(self.active_task_path, task)
-        self._write_next_action(f"{NEXT_ACTIONS[state]}\n")
+        self._write_next_action(f"{_next_action(state)}\n")
         return task
 
     def _detect_stack(self) -> list[str]:
@@ -772,7 +1457,7 @@ class AnchorProject:
         }
         found = []
         for stack, patterns in markers.items():
-            if any(self.root.glob(pattern) for pattern in patterns):
+            if any(any(self.root.glob(pattern)) for pattern in patterns):
                 found.append(stack)
         return found
 
@@ -849,8 +1534,10 @@ class AnchorProject:
         self._append_event({"task_id": task["id"], **event})
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        path = self.anchor_dir / "events.jsonl"
-        self.fs.append_text(path, json.dumps(event, sort_keys=True) + "\n")
+        if self._mutation_depth:
+            self._staged_events.append(deepcopy(event))
+            return
+        raise AnchorError("Anchor events must be emitted inside a project transaction.")
 
     def _ensure_graphify_ignore(self) -> None:
         path = self.root / ".graphifyignore"
@@ -865,17 +1552,55 @@ class AnchorProject:
             "dist/",
             "build/",
         ]
-        current = self.fs.read_text(path).splitlines() if self.fs.exists(path) else []
+        current = self._read_text(path).splitlines() if self._exists(path) else []
         additions = [line for line in required_lines if line not in current]
         if additions:
             prefix = "\n" if current else ""
             self._write_text(path, "\n".join(current) + prefix + "\n".join(additions) + "\n")
 
+    def _ensure_project_gitignore(self) -> None:
+        path = self.root / ".gitignore"
+        required_lines = (
+            "/cache/",
+            "/.cache/",
+            "/.anchor/cache/",
+            "/.npm/",
+            "/.npm-cache/",
+            "graphify-out/",
+            "__pycache__/",
+            "*.py[cod]",
+        )
+        current = self._read_text(path) if self._exists(path) else ""
+        existing_lines = set(current.splitlines())
+        additions = [line for line in required_lines if line not in existing_lines]
+        if not additions:
+            return
+        separator = "" if not current or current.endswith(("\n", "\r")) else "\n"
+        self._write_text(path, current + separator + "\n".join(additions) + "\n")
+
+    def _ensure_anchor_gitignore(self) -> None:
+        path = self.anchor_dir / ".gitignore"
+        required_lines = (
+            "cache/",
+            "logs/",
+            "graphify/query-history.jsonl",
+            "project.lock",
+            "transactions/",
+            "outbox/",
+        )
+        current = self._read_text(path) if self._exists(path) else ""
+        existing_lines = set(current.splitlines())
+        additions = [line for line in required_lines if line not in existing_lines]
+        if not additions:
+            return
+        separator = "" if not current or current.endswith(("\n", "\r")) else "\n"
+        self._write_text(path, current + separator + "\n".join(additions) + "\n")
+
     def _write_next_action(self, content: str) -> None:
         self._write_text(self.next_action_path, content)
 
     def next_action(self) -> str:
-        return self.fs.read_text(self.next_action_path).strip()
+        return self._read_text(self.next_action_path).strip()
 
     @staticmethod
     def _timestamp() -> str:
@@ -885,29 +1610,171 @@ class AnchorProject:
     def _slug(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
+    @staticmethod
+    def _mode_rank(mode: str) -> int:
+        return {"FAST": 0, "STANDARD": 1, "CAREFUL": 2}[mode]
+
+    @staticmethod
+    def _recommended_mode(task_type: str, brief: dict[str, Any]) -> tuple[str, str]:
+        text = " ".join([task_type, *(str(value) for value in brief.values())]).lower()
+        careful_terms = {
+            "migration",
+            "authentication",
+            "authorization",
+            "payment",
+            "secret",
+            "cryptograph",
+            "concurren",
+            "infrastructure",
+            "destructive",
+            "public api",
+            "new dependency",
+        }
+        matched = sorted(term for term in careful_terms if term in text)
+        if matched:
+            return "CAREFUL", f"risk signal: {', '.join(matched)}"
+        if task_type.lower() in {"docs", "chore"}:
+            return "FAST", f"task type {task_type!r} is normally low-risk and reversible"
+        if task_type.lower() != "general":
+            return "STANDARD", f"task type {task_type!r} changes product or code behavior"
+        return "STANDARD", "unknown task risk defaults to engineer-owned STANDARD planning"
+
+    @contextmanager
+    def _mutation(self, command: str, *, allow_unconfigured: bool) -> Iterator[None]:
+        if self._mutation_depth:
+            self._mutation_depth += 1
+            try:
+                yield
+            finally:
+                self._mutation_depth -= 1
+            return
+
+        if not allow_unconfigured:
+            self.require_setup()
+        with ProjectLock(self.root, purpose=command):
+            manager = TransactionManager(self.root)
+            manager.recover()
+            self._transaction_manager = manager
+            self._staged_files = {}
+            self._staged_events = []
+            self._mutation_depth = 1
+            try:
+                try:
+                    yield
+                except StateRecordedError:
+                    self._commit_staged(command)
+                    raise
+                else:
+                    self._commit_staged(command)
+            finally:
+                self._mutation_depth = 0
+                self._transaction = None
+                self._transaction_manager = None
+                self._staged_files = {}
+                self._staged_events = []
+
+    @contextmanager
+    def _consistent_read(self, command: str) -> Iterator[None]:
+        if self._mutation_depth:
+            yield
+            return
+        self.require_setup()
+        with ProjectLock(self.root, purpose=command):
+            health = TransactionManager(self.root).inspect()
+            if health.pending_transactions or health.outbox_events:
+                raise AnchorError(
+                    "AnchorLoop recovery is pending. Inspect with: "
+                    f"{display_command('doctor --strict')}; repair with: "
+                    f"{display_command('doctor --repair')}"
+                )
+            yield
+
+    def _commit_staged(self, command: str) -> None:
+        if not self._staged_files and not self._staged_events:
+            return
+        if self._transaction_manager is None:
+            raise AnchorError("Anchor mutation has no transaction manager.")
+        transaction = self._transaction_manager.begin(command=command)
+        self._transaction = transaction
+        writes = sorted(
+            ((path, content) for path, content in self._staged_files.items() if content is not None),
+            key=lambda item: item[0].as_posix(),
+        )
+        deletes = sorted(
+            (path for path, content in self._staged_files.items() if content is None),
+            key=lambda path: path.as_posix(),
+        )
+        for path, content in writes:
+            transaction.write_bytes(path, content)
+        for path in deletes:
+            transaction.delete(path)
+        for event in self._staged_events:
+            transaction.emit_event(event)
+        transaction.commit()
+
+    def _exists(self, path: Path) -> bool:
+        candidate = self.fs.validate(path)
+        if self._mutation_depth and candidate in self._staged_files:
+            return self._staged_files[candidate] is not None
+        return self.fs.exists(candidate)
+
+    def _read_bytes(self, path: Path) -> bytes:
+        candidate = self.fs.validate(path)
+        if self._mutation_depth and candidate in self._staged_files:
+            content = self._staged_files[candidate]
+            if content is None:
+                raise AnchorError(f"Managed path does not exist: {candidate}")
+            return content
+        return self.fs.read_bytes(candidate)
+
+    def _read_text(self, path: Path) -> str:
+        try:
+            return self._read_bytes(path).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AnchorError(f"Cannot decode managed file: {path}") from error
+
+    def _unlink(self, path: Path, *, missing_ok: bool = False) -> None:
+        candidate = self.fs.validate(path)
+        if not self._exists(candidate):
+            if missing_ok:
+                return
+            raise AnchorError(f"Managed path does not exist: {candidate}")
+        if self._mutation_depth:
+            self._staged_files[candidate] = None
+            return
+        self.fs.unlink(candidate, missing_ok=missing_ok)
+
     def _read_json(self, path: Path) -> dict[str, Any]:
         try:
-            data = json.loads(self.fs.read_text(path))
+            data = json.loads(self._read_text(path))
         except (AnchorError, UnicodeDecodeError) as error:
             raise AnchorError(f"Cannot read Anchor state at {path}.") from error
         except json.JSONDecodeError as error:
-            raise AnchorError(f"Anchor state is invalid JSON at {path}. Run: anchor doctor") from error
+            raise AnchorError(
+                f"Anchor state is invalid JSON at {path}. Run: {display_command('doctor')}"
+            ) from error
         if not isinstance(data, dict):
-            raise AnchorError(f"Anchor state at {path} must be a JSON object. Run: anchor doctor")
+            raise AnchorError(
+                f"Anchor state at {path} must be a JSON object. Run: {display_command('doctor')}"
+            )
         return data
 
     def _write_json(self, path: Path, data: dict[str, Any]) -> None:
-        self._write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+        self._write_text(path, json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
     def _write_json_if_missing(self, path: Path, data: dict[str, Any]) -> None:
-        if not self.fs.exists(path):
+        if not self._exists(path):
             self._write_json(path, data)
 
     def _write_text(self, path: Path, content: str) -> None:
-        self.fs.atomic_write_text(path, content)
+        candidate = self.fs.validate(path)
+        if self._mutation_depth:
+            self._staged_files[candidate] = content.encode("utf-8")
+            return
+        self.fs.atomic_write_text(candidate, content)
 
     def _write_text_if_missing(self, path: Path, content: str) -> None:
-        if not self.fs.exists(path):
+        if not self._exists(path):
             self._write_text(path, content)
 
     @staticmethod
@@ -927,9 +1794,20 @@ class AnchorProject:
         return {
             "task_id": task.get("id"),
             "title": task.get("title"),
+            "mode": task.get("mode"),
+            "task_type": task.get("task_type"),
             "brief": task.get("brief"),
             "brief_record": task.get("brief_record"),
             "plan": task.get("plan"),
+            "human_artifact": task.get("human_artifact"),
+            "comprehension_policy": (
+                {
+                    "baseline": task.get("comprehension", {}).get("baseline"),
+                    "recall_due_at": task.get("comprehension", {}).get("recall_due_at"),
+                }
+                if isinstance(task.get("comprehension"), dict)
+                else None
+            ),
             "ruleset": task.get("ruleset"),
         }
 
@@ -938,9 +1816,60 @@ class AnchorProject:
             "brief_digest": self._document_digest(subject["brief"]),
             "brief_record_digest": self._document_digest(subject["brief_record"]),
             "plan_digest": self._document_digest(subject["plan"]),
+            "ownership_digest": self._document_digest(
+                {
+                    "mode": subject["mode"],
+                    "task_type": subject["task_type"],
+                    "human_artifact": subject["human_artifact"],
+                    "comprehension_policy": subject["comprehension_policy"],
+                }
+            ),
             "ruleset_digest": self._document_digest(subject["ruleset"]),
             "task_digest": self._document_digest(subject),
         }
+
+    def _verification_subject_digest(
+        self,
+        task: dict[str, Any],
+        *,
+        result: str,
+        reason: str,
+        recall: str | None,
+    ) -> str:
+        quality = task.get("quality", [])
+        latest_quality = quality[-1] if quality else None
+        subject = {
+            "task_id": task.get("id"),
+            "approval_digest": task.get("approval", {}).get("task_digest"),
+            "quality_fingerprint": (
+                latest_quality.get("workspace_fingerprint")
+                if isinstance(latest_quality, dict)
+                else None
+            ),
+            "result": result,
+            "reason": self._required_text(reason, "Verification reason"),
+            "recall": recall.strip() if isinstance(recall, str) else None,
+        }
+        return self._document_digest(subject)
+
+    def _rule_supersession_subject_digest(
+        self,
+        old_rule: dict[str, Any],
+        new_rule: dict[str, Any],
+        active: dict[str, Any],
+        *,
+        reason: str,
+    ) -> str:
+        return self._document_digest(
+            {
+                "old_rule_id": old_rule.get("id"),
+                "old_rule_digest": old_rule.get("approved_document_digest"),
+                "new_rule_id": new_rule.get("id"),
+                "new_rule_digest": new_rule.get("approved_document_digest"),
+                "active_rules": active.get("rules"),
+                "reason": self._required_text(reason, "Supersession reason"),
+            }
+        )
 
     def _ensure_approval_matches_task(self, task: dict[str, Any]) -> None:
         approval = task.get("approval")
@@ -965,7 +1894,10 @@ class AnchorProject:
             next_action = "The approved brief changed. Record the brief again, then create and approve a plan."
         else:
             state = "planned"
-            next_action = "The approved plan or ruleset changed. Review it, then run: anchor approve --by <engineer>"
+            next_action = (
+                "The approved plan or ruleset changed. Review it, then run: "
+                f"{display_command('approve --by <engineer>')}"
+            )
         invalidation = {
             "at": self._timestamp(),
             "previous_state": task["state"],
@@ -983,7 +1915,7 @@ class AnchorProject:
         self._append_task_event(task, "task.approval.invalidated")
         self._write_json(self.active_task_path, task)
         self._write_next_action(f"{next_action}\n")
-        raise AnchorError(next_action)
+        raise StateRecordedError(next_action)
 
     @staticmethod
     def _approved_rule_document_digest(rule: dict[str, Any]) -> str:
@@ -1030,9 +1962,10 @@ class AnchorProject:
                 current_fingerprint=None,
                 reason="The recorded quality evidence predates workspace fingerprints.",
             )
-            raise AnchorError(
+            raise StateRecordedError(
                 "The latest quality result has no workspace fingerprint. "
-                "The task returned to review_ready; rerun: anchor precommit"
+                "The task returned to review_ready; rerun: "
+                f"{display_command('precommit')}"
             )
         current = workspace_fingerprint(self.root)
         if current.get("digest") == recorded.get("digest"):
@@ -1043,7 +1976,7 @@ class AnchorProject:
             current_fingerprint=current,
             reason="Code changed after the quality gate.",
         )
-        raise AnchorError("Code changed after the quality gate. The task returned to review_ready.")
+        raise StateRecordedError("Code changed after the quality gate. The task returned to review_ready.")
 
     def _invalidate_quality(
         self,
@@ -1074,5 +2007,6 @@ class AnchorProject:
         self._append_task_event(task, "task.quality.invalidated")
         self._write_json(self.active_task_path, task)
         self._write_next_action(
-            "Quality evidence was invalidated. Review the current diff and rerun: anchor precommit\n"
+            "Quality evidence was invalidated. Review the current diff and rerun: "
+            f"{display_command('precommit')}\n"
         )

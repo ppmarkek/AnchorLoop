@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
 
-from .project import AnchorError, AnchorProject, TASK_TRANSITIONS
+from .command import command_prefix, display_command
+from .project import AnchorError, AnchorProject, TASK_MODES, TASK_TRANSITIONS
 from .skill_install import SUPPORTED_PLATFORMS, SUPPORTED_SKILL_RUNTIMES, SkillInstaller
+from .version import VERSION
 
 
 def _path_argument(parser: argparse.ArgumentParser) -> None:
@@ -16,7 +20,7 @@ def _path_argument(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="anchor",
+        prog=command_prefix(),
         description="AnchorLoop: engineer-controlled, agent-neutral AI coding workflow.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -47,6 +51,32 @@ def build_parser() -> argparse.ArgumentParser:
         workflow_commands[name] = command
 
     workflow_commands["plan"].add_argument("--summary", required=True, help="Concrete plan prepared for engineer approval")
+    workflow_commands["plan"].add_argument(
+        "--mode",
+        choices=["AUTO", *sorted(TASK_MODES)],
+        default="AUTO",
+        help="AUTO applies the risk recommendation; lowering it requires an override reason",
+    )
+    workflow_commands["plan"].add_argument("--task-type", default="general")
+    workflow_commands["plan"].add_argument("--approach")
+    workflow_commands["plan"].add_argument("--alternative", dest="rejected_alternative")
+    workflow_commands["plan"].add_argument("--risk", dest="primary_risk")
+    workflow_commands["plan"].add_argument("--verification", dest="verification_strategy")
+    workflow_commands["plan"].add_argument("--human-artifact")
+    workflow_commands["plan"].add_argument("--comprehension")
+    workflow_commands["plan"].add_argument("--rollback-mitigation")
+    workflow_commands["plan"].add_argument("--mode-override-reason")
+    workflow_commands["plan"].add_argument("--by", help="Engineer owning the plan and human artifact")
+    workflow_commands["doctor"].add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail when required protocol, event-log, or next-action state is missing or corrupt",
+    )
+    workflow_commands["doctor"].add_argument(
+        "--repair",
+        action="store_true",
+        help="Replay prepared transactions and repair a torn final event-log record under the project lock",
+    )
     workflow_commands["approve"].add_argument("--by", required=True, help="Engineer approving the recorded plan")
     workflow_commands["approve"].add_argument(
         "--provenance",
@@ -57,6 +87,16 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_commands["verify"].add_argument("--by", required=True, help="Engineer who performed manual verification")
     workflow_commands["verify"].add_argument("--result", required=True, choices=("pass", "fail", "partial", "not-applicable"))
     workflow_commands["verify"].add_argument("--reason", required=True, help="Observed verification outcome or accepted limitation")
+    workflow_commands["verify"].add_argument(
+        "--recall",
+        help="Immediate engineer comprehension check; CAREFUL delayed recall is recorded later with the recall command",
+    )
+    workflow_commands["verify"].add_argument("--agent-turns", type=int)
+    workflow_commands["verify"].add_argument("--input-tokens", type=int)
+    workflow_commands["verify"].add_argument("--output-tokens", type=int)
+    workflow_commands["verify"].add_argument("--active-minutes", type=float)
+    workflow_commands["verify"].add_argument("--agent-provider")
+    workflow_commands["verify"].add_argument("--agent-model")
     workflow_commands["verify"].add_argument(
         "--provenance",
         choices=("audit", "interactive-tty"),
@@ -78,6 +118,36 @@ def build_parser() -> argparse.ArgumentParser:
     brief.add_argument("--invariant", required=True)
     brief.add_argument("--uncertainty", required=True)
     _path_argument(brief)
+
+    recall = commands.add_parser("recall", help="Record a due delayed-recall result for a closed CAREFUL task")
+    recall.add_argument("--task", required=True, dest="task_id")
+    recall.add_argument("--by", required=True)
+    recall.add_argument("--response", required=True)
+    recall.add_argument("--score", required=True, type=int, choices=range(0, 6))
+    _path_argument(recall)
+
+    outcome = commands.add_parser(
+        "outcome",
+        help="Record an engineer-reported post-completion outcome for a closed task",
+    )
+    outcome.add_argument("--task", required=True, dest="task_id")
+    outcome.add_argument("--by", required=True)
+    outcome.add_argument("--defects", required=True, type=int, dest="defects_found")
+    outcome.add_argument("--rollback", required=True, choices=("yes", "no"))
+    outcome.add_argument(
+        "--corrective-refactor",
+        required=True,
+        choices=("yes", "no"),
+    )
+    outcome.add_argument("--notes", required=True)
+    _path_argument(outcome)
+
+    report = commands.add_parser(
+        "report",
+        help="Print local model-by-mode pilot data from closed tasks",
+    )
+    report.add_argument("--format", choices=("json", "csv"), default="json")
+    _path_argument(report)
 
     rules = commands.add_parser("rules", help="Inspect and approve project rules")
     rule_commands = rules.add_subparsers(dest="rule_command", required=True)
@@ -141,6 +211,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    bundled_version = os.environ.get("ANCHORLOOP_BUNDLED_VERSION")
+    if bundled_version is not None and bundled_version != VERSION:
+        print(
+            f"Error: npm launcher version {bundled_version} does not match bundled Python version {VERSION}.",
+            file=sys.stderr,
+        )
+        return 2
     args = build_parser().parse_args(argv)
     root = Path(getattr(args, "path", "."))
     if args.command == "init" and args.name:
@@ -171,7 +248,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(project.status(), indent=2))
             return 0
         if args.command == "doctor":
-            _print_doctor(project)
+            payload = _print_doctor(project, strict=args.strict, repair=args.repair)
+            if (args.strict or args.repair) and payload["status"] != "ok":
+                return 2
             return 0
         if args.command == "start":
             task = project.start_task(args.title)
@@ -193,19 +272,62 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(project.next_action())
             return 0
         if args.command == "plan":
-            task = project.plan_task(args.summary)
+            task = project.plan_task(
+                args.summary,
+                mode=args.mode,
+                task_type=args.task_type,
+                approach=args.approach,
+                rejected_alternative=args.rejected_alternative,
+                primary_risk=args.primary_risk,
+                verification_strategy=args.verification_strategy,
+                human_artifact=args.human_artifact,
+                comprehension=args.comprehension,
+                rollback_mitigation=args.rollback_mitigation,
+                mode_override_reason=args.mode_override_reason,
+                by=args.by,
+            )
             print(f"Task {task['id']} is now {task['state']}.")
             print(project.next_action())
             return 0
         if args.command == "approve":
-            provenance, interactive_confirmed = _approval_capture(args.provenance)
+            approval_preview = project.task_approval_preview() if args.provenance == "interactive-tty" else None
+            provenance, interactive_confirmed = _approval_capture(
+                args.provenance,
+                subject=approval_preview,
+            )
             task = project.approve_task(
                 args.by,
                 provenance=provenance,
                 interactive_confirmed=interactive_confirmed,
+                expected_subject_digest=(
+                    approval_preview["subject_digest"] if approval_preview is not None else None
+                ),
             )
             print(f"Task {task['id']} is now {task['state']}.")
             print(project.next_action())
+            return 0
+        if args.command == "recall":
+            task = project.record_delayed_recall(
+                task_id=args.task_id,
+                by=args.by,
+                response=args.response,
+                score=args.score,
+            )
+            print(f"Delayed recall recorded for {task['id']} with score {args.score}/5.")
+            return 0
+        if args.command == "outcome":
+            task = project.record_post_completion_outcome(
+                task_id=args.task_id,
+                by=args.by,
+                defects_found=args.defects_found,
+                rollback=args.rollback == "yes",
+                corrective_refactor=args.corrective_refactor == "yes",
+                notes=args.notes,
+            )
+            print(f"Post-completion outcome recorded for {task['id']}.")
+            return 0
+        if args.command == "report":
+            _print_experiment_report(project.experiment_report(), output_format=args.format)
             return 0
         if args.command == "precommit":
             task = project.precommit()
@@ -213,13 +335,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(project.next_action())
             return 0
         if args.command == "verify":
-            provenance, interactive_confirmed = _approval_capture(args.provenance)
+            verification_preview = (
+                project.verification_preview(result=args.result, reason=args.reason, recall=args.recall)
+                if args.provenance == "interactive-tty"
+                else None
+            )
+            provenance, interactive_confirmed = _approval_capture(
+                args.provenance,
+                subject=verification_preview,
+            )
             task = project.verify_task(
                 by=args.by,
                 result=args.result,
                 reason=args.reason,
                 provenance=provenance,
                 interactive_confirmed=interactive_confirmed,
+                recall=args.recall,
+                agent_turns=args.agent_turns,
+                input_tokens=args.input_tokens,
+                output_tokens=args.output_tokens,
+                active_minutes=args.active_minutes,
+                agent_provider=args.agent_provider,
+                agent_model=args.agent_model,
+                expected_subject_digest=(
+                    verification_preview["subject_digest"]
+                    if verification_preview is not None
+                    else None
+                ),
             )
             print(f"Task {task['id']} is now {task['state']}.")
             print(project.next_action())
@@ -252,23 +394,49 @@ def _run_rules(project: AnchorProject, args: argparse.Namespace) -> int:
         return 0
     if args.rule_command == "propose":
         rule = project.propose_rule(args.category, args.wording)
+        approval_command = display_command(
+            f"rules approve {rule['id']} --by <engineer>"
+        )
         print(
             f"Proposed {rule['id']}. It is inactive until an engineer runs: "
-            f"anchor rules approve {rule['id']} --by <engineer>"
+            f"{approval_command}"
         )
         return 0
     if args.rule_command == "approve":
-        provenance, interactive_confirmed = _approval_capture(args.provenance)
+        approval_preview = (
+            project.rule_approval_preview(args.rule_id)
+            if args.provenance == "interactive-tty"
+            else None
+        )
+        provenance, interactive_confirmed = _approval_capture(
+            args.provenance,
+            subject=approval_preview,
+        )
         rule = project.approve_rule(
             args.rule_id,
             by=args.by,
             provenance=provenance,
             interactive_confirmed=interactive_confirmed,
+            expected_subject_digest=(
+                approval_preview["subject_digest"] if approval_preview is not None else None
+            ),
         )
         print(f"Approved {rule['id']} version {rule['version']}.")
         return 0
     if args.rule_command == "supersede":
-        provenance, interactive_confirmed = _approval_capture(args.provenance)
+        supersession_preview = (
+            project.rule_supersession_preview(
+                old_rule_id=args.old_rule_id,
+                new_rule_id=args.new_rule_id,
+                reason=args.reason,
+            )
+            if args.provenance == "interactive-tty"
+            else None
+        )
+        provenance, interactive_confirmed = _approval_capture(
+            args.provenance,
+            subject=supersession_preview,
+        )
         result = project.supersede_rule(
             old_rule_id=args.old_rule_id,
             new_rule_id=args.new_rule_id,
@@ -276,6 +444,11 @@ def _run_rules(project: AnchorProject, args: argparse.Namespace) -> int:
             reason=args.reason,
             provenance=provenance,
             interactive_confirmed=interactive_confirmed,
+            expected_subject_digest=(
+                supersession_preview["subject_digest"]
+                if supersession_preview is not None
+                else None
+            ),
         )
         print(f"Active {result['category']} rule is now {result['active_rule']}.")
         return 0
@@ -324,7 +497,11 @@ def _run_skill_install(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
-def _approval_capture(provenance: str) -> tuple[str, bool]:
+def _approval_capture(
+    provenance: str,
+    *,
+    subject: dict[str, object] | None = None,
+) -> tuple[str, bool]:
     if provenance == "audit":
         return provenance, False
     if provenance == "interactive-tty" and not sys.stdin.isatty():
@@ -332,17 +509,24 @@ def _approval_capture(provenance: str) -> tuple[str, bool]:
             "interactive-tty provenance requires an interactive terminal. "
             "Use audit when recording an auditable but non-authenticated action."
         )
+    if not subject or not isinstance(subject.get("subject_digest"), str):
+        raise AnchorError("Interactive approval requires an exact subject digest.")
+    digest = str(subject["subject_digest"])
+    short_digest = digest.removeprefix("sha256:")[:12]
+    print("Interactive approval subject:")
+    print(json.dumps(subject, indent=2, sort_keys=True))
+    expected = f"APPROVE {short_digest}"
     try:
-        confirmation = input("Type APPROVE to record an interactive approval: ").strip()
+        confirmation = input(f"Type {expected} to record this exact approval: ").strip()
     except EOFError as error:
         raise AnchorError("Interactive approval confirmation was not received.") from error
-    if confirmation != "APPROVE":
+    if confirmation != expected:
         raise AnchorError("Interactive approval was not confirmed.")
     return provenance, True
 
 
 def _skill_apply_command(args: argparse.Namespace) -> str:
-    parts = ["anchor", args.command]
+    parts = [args.command]
     if args.project:
         parts.append("--project")
     parts.extend(["--platform", args.platform, "--apply"])
@@ -350,7 +534,7 @@ def _skill_apply_command(args: argparse.Namespace) -> str:
         parts.extend(["--skill-runtime", args.skill_runtime, "--npx-package", args.npx_package])
     if args.force:
         parts.append("--force")
-    return " ".join(parts)
+    return display_command(" ".join(parts))
 
 
 def _skill_apply_instruction(args: argparse.Namespace, root: Path) -> str:
@@ -378,27 +562,77 @@ def _run_agent(project: AnchorProject, args: argparse.Namespace) -> int:
 
 
 def _print_help() -> None:
+    command = command_prefix()
     print(
         "ANCHOR\n"
         "Engineer owns scope, decisions, rules, skills, and acceptance.\n"
         "The agent may write code only after an explicit approval.\n\n"
-        "Setup:   anchor add --apply\n"
-        "Skill:   anchor install --project --platform agents --apply\n"
-        "Task:    anchor start \"short title\" -> brief -> plan -> approve -> implement -> review -> precommit -> verify -> close\n"
-        "Rules:   anchor rules list | propose | approve | supersede\n"
-        "Agent:   anchor agent detect | setup portable | status\n\n"
-        "After anchor start, provide:\n"
+        f"Setup:   {command} add --apply\n"
+        f"Skill:   {command} install --project --platform agents --apply\n"
+        f"Task:    {command} start \"short title\" -> brief -> plan -> approve -> implement -> review -> precommit -> verify -> close\n"
+        f"Recall:  {command} recall --task <closed-task-id> --by <engineer> --response <text> --score 0..5\n"
+        f"Outcome: {command} outcome --task <closed-task-id> --by <engineer> --defects <n> --rollback yes|no --corrective-refactor yes|no --notes <text>\n"
+        f"Report:  {command} report --format json|csv\n"
+        f"Rules:   {command} rules list | propose | approve | supersede\n"
+        f"Agent:   {command} agent detect | setup portable | status\n\n"
+        f"After {command} start, provide:\n"
         "Outcome:\nScope / non-goals:\nConstraints:\nInvariant or acceptance case:\nMain uncertainty:\n\n"
-        "Record with: anchor brief --by <engineer> --outcome <text> --scope <text> --constraints <text> "
+        f"Record with: {command} brief --by <engineer> --outcome <text> --scope <text> --constraints <text> "
         "--invariant <text> --uncertainty <text>\n"
     )
 
 
-def _print_doctor(project: AnchorProject) -> None:
-    payload = project.doctor()
+def _print_doctor(
+    project: AnchorProject,
+    *,
+    strict: bool = False,
+    repair: bool = False,
+) -> dict[str, object]:
+    payload = project.doctor(strict=strict, repair=repair)
     payload["graphify"] = "not-installed (approval required)"
     payload["python"] = sys.version.split()[0]
     print(json.dumps(payload, indent=2))
+    return payload
+
+
+def _print_experiment_report(
+    payload: dict[str, object],
+    *,
+    output_format: str,
+) -> None:
+    if output_format == "json":
+        print(json.dumps(payload, indent=2))
+        return
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list):
+        raise AnchorError("Experiment report does not contain task rows.")
+    fieldnames = [
+        "task_id",
+        "title",
+        "mode",
+        "task_type",
+        "verification_result",
+        "wall_seconds",
+        "active_minutes",
+        "agent_turns",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "agent_provider",
+        "agent_model",
+        "delayed_recall_score",
+        "outcome_observations",
+        "defects_found",
+        "rollback",
+        "corrective_refactor",
+        "outcome_recorded_at",
+    ]
+    writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in tasks:
+        if not isinstance(row, dict):
+            raise AnchorError("Experiment report task row is invalid.")
+        writer.writerow(row)
 
 
 if __name__ == "__main__":

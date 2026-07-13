@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  exact-tag-ci:
+    name: Green CI for tagged commit
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish-npm:
+    name: Publish npm package
+    needs: exact-tag-ci
+    runs-on: ubuntu-latest
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Use an OIDC-capable npm client
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+
+      - name: Verify canonical version and exact release tag
+        id: release
+        shell: bash
+        env:
+          ANCHORLOOP_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          npm run version:check
+          version="$(node -p "require('./npm/scripts/version.js').readCanonicalVersion(process.cwd())")"
+          package_name="$(node -p "require('./package.json').name")"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'package_name=%s\n' "$package_name" >> "$GITHUB_OUTPUT"
+
+      - name: Require a GitHub-verified signed annotated tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          object_type="$(jq -r '.object.type' <<< "$ref_json")"
+          object_sha="$(jq -r '.object.sha' <<< "$ref_json")"
+          test "$object_type" = "tag" || {
+            echo "Release tags must be annotated and signed; ${RELEASE_TAG} is ${object_type}." >&2
+            exit 1
+          }
+
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+          verified="$(jq -r '.verification.verified' <<< "$tag_json")"
+          target_type="$(jq -r '.object.type' <<< "$tag_json")"
+          target_sha="$(jq -r '.object.sha' <<< "$tag_json")"
+          test "$verified" = "true" || {
+            echo "GitHub did not verify the signature on ${RELEASE_TAG}." >&2
+            exit 1
+          }
+          test "$target_type" = "commit" || {
+            echo "${RELEASE_TAG} must point directly to a commit." >&2
+            exit 1
+          }
+          test "$target_sha" = "$(git rev-parse HEAD)" || {
+            echo "${RELEASE_TAG} does not point to the checked-out commit." >&2
+            exit 1
+          }
+
+      - name: Require the npm bootstrap reservation
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+        run: |
+          set -euo pipefail
+          if ! published_name="$(npm view "${PACKAGE_NAME}" name --json 2>/dev/null)"; then
+            echo "${PACKAGE_NAME} does not exist in npm yet." >&2
+            echo "Reserve it first with a lower, version-consistent bootstrap release; then configure the trusted publisher." >&2
+            exit 1
+          fi
+          test "$(jq -r '.' <<< "$published_name")" = "$PACKAGE_NAME" || {
+            echo "npm returned an unexpected package identity for ${PACKAGE_NAME}." >&2
+            exit 1
+          }
+
+      - name: Build the exact publishable archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-npm
+          npm pack --pack-destination dist-npm
+          mapfile -t archives < <(find dist-npm -maxdepth 1 -type f -name '*.tgz' -print)
+          test "${#archives[@]}" -eq 1 || {
+            echo "Expected exactly one npm tarball, found ${#archives[@]}." >&2
+            exit 1
+          }
+          printf 'path=%s\n' "${archives[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish with npm provenance through trusted publishing
+        run: npm publish "${{ steps.archive.outputs.path }}" --access public --provenance
+
+      - name: Smoke-test the public registry release
+        env:
+          ANCHORLOOP_RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          node npm/scripts/registry-smoke.js
+          --package "${{ steps.release.outputs.package_name }}"
+          --version "${{ steps.release.outputs.version }}"
+

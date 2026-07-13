@@ -9,6 +9,10 @@ engine and it never becomes the source of truth for task state.
 For a Codex project with Node.js 18+ and Python 3.11+, the npm shortcut is the
 fastest route:
 
+> The public npm package is not published yet. Until the signed-tag release
+> workflow succeeds, this command returns `E404`; use the standalone Git
+> installation and do not substitute a similarly named package.
+
 ~~~powershell
 npx anchorloop install
 ~~~
@@ -17,8 +21,7 @@ It installs `.codex/skills/anchorloop/` and renders the skill with a pinned
 `npx --yes anchorloop@<version>` runner. The runner packages the Python source,
 so it can execute later AnchorLoop commands without a globally installed
 `anchor` executable. It never writes `node_modules`, a Python bytecode cache,
-or a workflow cache into the project. The package must be published to npm
-before this public shortcut can resolve.
+or a workflow cache into the project.
 
 For a project-scoped installation, AnchorLoop rejects symlink and Windows
 reparse-point components in `.codex/`, `.agents/`, `skills/`, and the skill
@@ -52,6 +55,13 @@ installer-owned file was edited locally; this preserves local work and prevents
 broad deletion. Use `--force` only when those edits are intentionally being
 replaced or removed.
 
+Install, update, and uninstall are serialized per destination and use a durable
+journal outside the project. The marker is committed last. If a process stops
+between asset writes, the next mutating installer command rolls the exact
+operation forward before proceeding; read-only status reports
+`recovery_pending` without changing files. A successful operation removes its
+journal and does not leave a cache in the repository.
+
 Uninstall removes only unchanged installer-owned files:
 
 ~~~powershell
@@ -83,6 +93,13 @@ The installed skill directs an agent to run the installer-rendered command
 runner (either `anchor` or a pinned npx command) for `status`, then read
 `.anchor/next-action.md`. It must not edit state JSON directly or act as the
 engineer at approval, rule, verification, or close gates.
+
+The skill also enforces the human-ownership modes exposed by the CLI. It uses
+`AUTO` risk selection, asks for real engineer-authored plan/artifact and
+comprehension inputs in STANDARD/CAREFUL, requires rollback mitigation for
+CAREFUL, and never fabricates immediate or delayed recall. Project lock,
+transaction, outbox, cache, npm-cache, and bytecode artifacts remain ignored
+runtime state rather than committed evidence.
 
 The CLI records `audit` or `interactive-tty` provenance. The latter requires
 an interactive terminal and a typed `APPROVE` confirmation, but neither is a

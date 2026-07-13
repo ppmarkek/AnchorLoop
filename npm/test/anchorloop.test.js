@@ -10,6 +10,7 @@ const test = require("node:test");
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const launcher = path.join(repositoryRoot, "npm", "bin", "anchorloop.js");
 const packageMetadata = require(path.join(repositoryRoot, "package.json"));
+const { readCanonicalVersion } = require(path.join(repositoryRoot, "npm", "scripts", "version.js"));
 
 function runLauncher(args, cwd) {
   return spawnSync(process.execPath, [launcher, ...args], {
@@ -41,9 +42,30 @@ test("the shortcut installs a Codex skill that keeps an npx command runner", () 
 
     const setup = runLauncher(["add", "--apply"], project);
     assert.equal(setup.status, 0, setup.stderr);
+    const expectedRunner = `npx --yes ${packageMetadata.name}@${packageMetadata.version}`;
+    const nextAction = fs.readFileSync(
+      path.join(project, ".anchor", "next-action.md"),
+      "utf8",
+    );
+    assert.equal(nextAction.includes(`${expectedRunner} start`), true, nextAction);
+    assert.equal(nextAction.includes("{command}"), false, nextAction);
+
+    const help = runLauncher(["help"], project);
+    assert.equal(help.status, 0, help.stderr);
+    assert.equal(help.stdout.includes(`${expectedRunner} add --apply`), true, help.stdout);
+
+    const shadowPackage = path.join(project, "anchorloop");
+    fs.mkdirSync(shadowPackage);
+    fs.writeFileSync(path.join(shadowPackage, "__init__.py"), "", "utf8");
+    fs.writeFileSync(
+      path.join(shadowPackage, "cli.py"),
+      "from pathlib import Path\nPath('foreign-python-source-ran').write_text('unsafe')\n",
+      "utf8",
+    );
     const status = runLauncher(["status"], project);
     assert.equal(status.status, 0, status.stderr);
     assert.match(status.stdout, /"active_task": null/);
+    assert.equal(fs.existsSync(path.join(project, "foreign-python-source-ran")), false);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -51,15 +73,29 @@ test("the shortcut installs a Codex skill that keeps an npx command runner", () 
 
 test("the package manifest allowlists the runner and its Python skill assets", () => {
   const pyproject = fs.readFileSync(path.join(repositoryRoot, "pyproject.toml"), "utf8");
-  const pythonVersion = /^version = "([^"]+)"$/m.exec(pyproject)?.[1];
+  const launcherSource = fs.readFileSync(launcher, "utf8");
+  const canonicalVersion = readCanonicalVersion(repositoryRoot);
 
   assert.equal(packageMetadata.name, "anchorloop");
-  assert.equal(packageMetadata.version, pythonVersion);
+  assert.equal(packageMetadata.version, canonicalVersion);
+  assert.match(pyproject, /^dynamic = \["version"\]$/m);
+  assert.match(pyproject, /^version = \{ attr = "anchorloop\.version\.VERSION" \}$/m);
   assert.equal(packageMetadata.bin.anchorloop, "npm/bin/anchorloop.js");
+  assert.match(launcherSource, /\.\.\.python\.args, "-I", "-B", "-c"/);
   assert(packageMetadata.files.includes("npm/bin/anchorloop.js"));
+  assert(packageMetadata.files.includes("npm/scripts/version.js"));
+  assert(packageMetadata.files.includes("npm/scripts/registry-smoke.js"));
+  assert(packageMetadata.files.includes("src/anchorloop/command.py"));
   assert(packageMetadata.files.includes("src/anchorloop/cli.py"));
+  assert(packageMetadata.files.includes("src/anchorloop/project_lock.py"));
   assert(packageMetadata.files.includes("src/anchorloop/safe_fs.py"));
+  assert(packageMetadata.files.includes("src/anchorloop/transaction.py"));
+  assert(packageMetadata.files.includes("src/anchorloop/version.py"));
   assert(packageMetadata.files.includes("src/anchorloop/skills/"));
+  assert(packageMetadata.files.includes("CONTEXT.md"));
+  assert(packageMetadata.files.includes("CONTRIBUTING.md"));
+  assert(packageMetadata.files.includes("SECURITY.md"));
+  assert(packageMetadata.files.includes("docs/"));
   assert.equal(fs.existsSync(path.join(repositoryRoot, "src", "anchorloop", "skills", "anchorloop", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(repositoryRoot, "src", "anchorloop", "skills", "anchorloop", "references", "workflow.md")), true);
   assert.equal(packageMetadata.files.some((file) => /(?:^|\/)(?:cache|\.cache|node_modules)(?:\/|$)/.test(file)), false);

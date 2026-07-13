@@ -11,6 +11,10 @@
     "url": "https://github.com/ppmarkek/AnchorLoop/issues"
   },
   "homepage": "https://github.com/ppmarkek/AnchorLoop#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "bin": {
     "anchorloop": "npm/bin/anchorloop.js"
   },
@@ -19,21 +23,33 @@
   },
   "files": [
     "npm/bin/anchorloop.js",
+    "npm/scripts/version.js",
+    "npm/scripts/registry-smoke.js",
     "src/anchorloop/__init__.py",
+    "src/anchorloop/command.py",
     "src/anchorloop/cli.py",
     "src/anchorloop/project.py",
+    "src/anchorloop/project_lock.py",
     "src/anchorloop/quality.py",
     "src/anchorloop/safe_fs.py",
     "src/anchorloop/skill_install.py",
+    "src/anchorloop/transaction.py",
+    "src/anchorloop/version.py",
     "src/anchorloop/skills/",
     "pyproject.toml",
     "README.md",
+    "CONTEXT.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE",
-    "docs/assets/"
+    "docs/"
   ],
   "scripts": {
     "test": "npm run test:npm",
-    "test:npm": "node --test npm/test/*.test.js",
-    "pack:check": "npm pack --dry-run"
+    "test:npm": "node --test npm/test/anchorloop.test.js npm/test/version.test.js",
+    "version:check": "node npm/scripts/version.js",
+    "prepack": "npm run version:check",
+    "pack:check": "npm pack --dry-run",
+    "registry:smoke": "node npm/scripts/registry-smoke.js"
   }
 }

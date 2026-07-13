@@ -146,6 +146,5 @@ class FilesystemSafetyTests(unittest.TestCase):
             (root / "a").write_bytes(b"hello\0file\0path\01\0b\0world")
             second = workspace_fingerprint(root)
 
-            self.assertEqual(first["format_version"], 2)
+            self.assertEqual(first["format_version"], 3)
             self.assertNotEqual(first["digest"], second["digest"])
-
