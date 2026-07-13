@@ -9,15 +9,15 @@ Type: Discuss
 
 ### Question
 
-Should the first public release target only Codex, or support several coding agents from day one?
+How will the first public release provide the same core workflow to all coding agents while using native integrations only where a host supports them?
 
 ### Answer
 
-Pending. Default: Codex-first skill and local CLI with an adapter interface that does not lock out other agents.
+Resolved: AnchorLoop has an agent-neutral core from the first release. Every coding agent can use the `anchor` CLI and portable workflow files; native adapters are added where a host exposes commands, skills, hooks, or MCP. No host-specific integration may become the source of truth.
 
 ## #2: CLI runtime
 
-Blocked by: #1  
+Blocked by: none
 Type: Prototype
 
 ### Question
@@ -30,7 +30,7 @@ Pending. Prototype bootstrap, YAML/JSON state, subprocess calls, and cross-platf
 
 ## #3: Skill catalogue and trust policy
 
-Blocked by: #1  
+Blocked by: none
 Type: Research
 
 ### Question

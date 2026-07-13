@@ -1,7 +1,7 @@
 # AnchorLoop — detailed project plan
 
 Status: draft 0.1  
-Scope: Codex-first, local workflow controller for AI-assisted engineering
+Scope: agent-neutral, local workflow controller for AI-assisted engineering
 
 ## 1. Product intent
 
@@ -25,7 +25,8 @@ The first release must:
 - use Graphify before broad file search;
 - let the engineer discover, inspect, select, and explicitly install skills;
 - offer opt-in explanations and practice tied to the active task;
-- work in one repository without a server, account, IDE extension, or remote database.
+- work in one repository without a server, account, IDE extension, or remote database;
+- give every coding agent access to the same core workflow through the `anchor` CLI and portable project state, while using native integrations when a host supports them.
 
 It explicitly does not:
 
@@ -38,30 +39,46 @@ It explicitly does not:
 
 ## 3. Product shape
 
-AnchorLoop has two layers.
+AnchorLoop has three layers. The core is independent of any AI provider or IDE.
 
 ~~~mermaid
 flowchart LR
-  E[Engineer] --> C[Codex skill: /anchor]
-  C --> S[Anchor state machine]
-  S --> F[.anchor/ project state]
-  S --> G[Graphify adapter]
-  S --> K[Skill policy & catalogue]
-  S --> R[Research adapter]
-  C --> A[AI coding agent]
+  E[Engineer] --> H[Agent host / terminal]
+  H --> D[Host adapter or generic protocol]
+  D --> C[Anchor core CLI & state machine]
+  C --> F[.anchor/ project state]
+  C --> G[Graphify adapter]
+  C --> K[Skill policy & catalogue]
+  C --> R[Research adapter]
+  H --> A[AI coding agent]
   A --> W[Repository & automated checks]
-  E -->|explicit gates| S
+  E -->|explicit gates| C
 ~~~
 
-### 3.1 Codex skill
+### 3.1 Portable Anchor protocol
 
-The `anchor` skill recognises chat commands, reads the active task state, requests the next human input in a fixed format, and states whether the agent may inspect, edit, test, or must stop. It remains concise; workflow definitions and templates are loaded from the project only when needed.
+The portable protocol defines commands, task states, output formats, approval records, and exit codes. It lives in the CLI and `.anchor/`, so it is not owned by any model, provider, IDE, or slash-command format. A host with terminal access can run `anchor help`, `anchor status`, and every task transition directly. If a host has no terminal integration, the engineer or a local bridge runs the same CLI and supplies the generated next action to the agent.
 
-### 3.2 Local CLI
+### 3.2 Local CLI and core
 
-The `anchor` CLI creates and validates local state, runs deterministic checks, invokes Graphify, performs safe scaffolding, and provides a stable terminal interface. It never decides product intent for the engineer.
+The `anchor` CLI is the source of truth. It creates and validates state, runs deterministic checks, invokes Graphify, performs safe scaffolding, and provides a stable terminal interface. It never decides product intent for the engineer.
 
-### 3.3 Local-first state
+### 3.3 Host adapters
+
+A host adapter is deliberately thin. It reads the CLI state and maps the portable protocol to the host’s available surface:
+
+| Host capability | Adapter behaviour |
+|---|---|
+| No terminal, plugins, or hooks | Read a generated portable instruction/next-action file; the engineer or local bridge executes CLI transitions. No hard enforcement claim. |
+| Terminal only | Use `anchor` CLI commands and write the next allowed action to a portable instruction file. |
+| Instructions or skills | Install a concise wrapper that reads Anchor state before acting and displays the next gate. |
+| Native slash commands | Map the host’s command syntax to `anchor` CLI operations. |
+| Hooks | Warn or block edits/commits that violate the active task state, without replacing CLI validation. |
+| MCP | Expose structured read-only state and explicit transition tools. |
+
+Every host has the portable-protocol fallback; terminal access makes it self-service. Native integration improves ergonomics and enforcement; it never changes the workflow semantics.
+
+### 3.4 Local-first state
 
 Human-authored configuration and workflows use YAML. Generated records and cache use JSON/JSONL. All state must remain readable and repairable without AI.
 
@@ -93,6 +110,8 @@ The first release assumes one engineer. Team support means shared repository sta
 
 Chat uses `/anchor …`. The terminal equivalent is `anchor …` where deterministic execution is needed.
 
+The slash form is an adapter convenience, not a requirement. On an agent that does not provide slash commands, the engineer invokes the equivalent CLI command or writes the command in the host’s supported chat syntax.
+
 ### 6.1 Project commands
 
 | Command | Purpose | Mutation policy |
@@ -102,6 +121,9 @@ Chat uses `/anchor …`. The terminal equivalent is `anchor …` where determini
 | `/anchor add` | Attach Anchor to an existing repository. Detects stack and proposes changes but does not alter application source. | Preview, then explicit setup approval |
 | `/anchor status` | Show project configuration, active task, graph freshness, mode, and selected skills. | Read-only |
 | `/anchor doctor` | Validate CLI, state schema, Graphify, and configured repository commands. | Cache-only |
+| `/anchor agent detect` | Detect the current host’s available integration capabilities; no installation. | Read-only |
+| `/anchor agent setup <host>` | Preview the selected host adapter, generated instruction files, hooks, and required dependencies. | Preview, then explicit approval |
+| `/anchor agent status` | Show generic fallback availability and the active host adapter’s capability matrix. | Read-only |
 
 ### 6.2 Task commands
 
@@ -387,6 +409,11 @@ A paused task stores its prior state. A transition that changes source files is 
 ~~~
 .anchor/
   config.yaml                     # committed project settings
+  protocol/
+    anchor-protocol.yaml           # committed portable commands, states, and output schema
+  agents/
+    capabilities.json              # detected host capabilities; local cache
+    adapters/                      # selected adapter manifests and generated instructions
   workflows/                      # committed state-machine definitions
     feature.yaml
     bugfix.yaml
@@ -469,7 +496,7 @@ The CLI validates every write and preserves an append-only transition event log.
 
 ## 12. Graphify adapter
 
-Graphify is the first navigation provider, not a replacement for source control or tests. Its upstream project supports project-scoped agent installation, `graphify-out/`, `.graphifyignore`, and incremental updates. See [Graphify](https://github.com/Graphify-Labs/graphify).
+Graphify is the first navigation provider, not a replacement for source control or tests. Anchor calls its CLI from the agent-neutral core and uses a host-specific Graphify skill only when the host supports skills. Its upstream project supports project-scoped agent installation, `graphify-out/`, `.graphifyignore`, and incremental updates. See [Graphify](https://github.com/Graphify-Labs/graphify).
 
 ### 12.1 Setup
 
@@ -561,7 +588,7 @@ Default output is short. `--deep` can add trace, comparison, and example. The ag
 
 Deliver:
 
-- concise Codex `anchor` skill with command recognition and gate rules;
+- portable Anchor protocol plus a thin reference adapter for a skill-capable host;
 - workflow schemas for feature, bugfix, refactor, migration, and new project;
 - task/state schema, transition table, and output fixtures;
 - proposed quality, security, and structure baseline packs, rule-governance schema, and quality result schema;
@@ -574,6 +601,7 @@ Done when every command has a state, allowed actions, required human input, and 
 Deliver:
 
 - `init`, `add`, `help`, `status`, and `doctor`;
+- `agent detect`, `agent setup`, and `agent status` with a terminal-only fallback;
 - setup preview/approval protocol;
 - default `.anchor/` scaffold and ignore files;
 - tests for empty, non-empty, non-git, and already-initialised directories.
@@ -651,7 +679,7 @@ Set success thresholds before the pilot. Initial target: no more than 5% worse w
 Only after pilot evidence:
 
 - tune defaults from observed friction;
-- decide whether to add a second coding-agent adapter;
+- publish a compatibility matrix and promote generic host support to native adapters where it materially improves control;
 - choose the long-term CLI runtime/installer;
 - publish worked examples;
 - decide the default commit policy for task state and `graphify-out/`.
@@ -663,7 +691,8 @@ Only after pilot evidence:
 | Workflow engine | valid/invalid transitions, approval gates, pause/resume, migration between workflow versions |
 | State files | schema validation, atomic writes, corruption recovery, upgrades, ignore policy |
 | CLI | parsing, preview/approve behaviour, exit codes, non-interactive operation |
-| Codex skill | transcript fixtures for help, planning, approval, review, failed verification, learning, skill selection |
+| Portable protocol | CLI fixtures for help, planning, approval, review, failed verification, learning, and skill selection |
+| Host adapters | no-terminal and terminal-only fallback, capability detection, generated instruction wrappers, native-command mapping, and hook absence |
 | Quality gate | configured command failures, clean-code finding evidence, exception recording, no-commit guarantee |
 | Security | secret detection, injection/authz boundary fixtures, language-profile loading, network declaration |
 | Rule governance | proposed rules cannot apply, exact-version approval, edit/retire audit trail, task ruleset pinning |
@@ -716,17 +745,18 @@ Metrics diagnose the workflow; they never rank individual engineers.
 | AI silently changes project architecture | Pin ruleset versions, require separate structural-plan and rule approvals, and make structure checks use only approved policy. |
 | State exposes context | Local-first storage, ignore defaults, export only by choice. |
 | Graphify changes upstream | Adapter boundary, version capture, compatibility tests, graceful degradation. |
+| One host imposes its workflow on all others | CLI and `.anchor/` remain the source of truth; adapters are thin and capability-bound. |
 
 ## 21. Build order
 
 1. Finalise workflow contract and schemas.
-2. Implement chat `/anchor help` and gate enforcement.
-3. Implement local scaffold plus `init` and `add`.
+2. Implement the portable command protocol and terminal-only fallback.
+3. Implement local scaffold, `init`, `add`, and host-capability detection.
 4. Build rule governance, project-structure policy, task lifecycle, and quality/security gate end-to-end in a fixture repository.
 5. Add Graphify and `locate`, then structural impact analysis.
 6. Add learning commands.
 7. Add external research and skill discovery/control.
-8. Run the pilot; only then expand distribution or build an IDE extension.
+8. Run the pilot across at least two different agent hosts; add native adapters based on observed capability gaps rather than provider preference.
 
 ## 22. Open decisions
 

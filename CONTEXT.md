@@ -2,7 +2,8 @@
 
 - **Engineer** — the human who owns project intent, task priority, key decisions, skill selection, and acceptance.
 - **Agent** — an AI coding agent. It may inspect, plan, implement, and run automated checks only within the active workflow phase.
-- **Anchor** — the local workflow controller: a Codex skill, an `anchor` CLI, and project-local state in `.anchor/`.
+- **Anchor** — the agent-neutral local workflow controller: an `anchor` CLI, project-local state in `.anchor/`, and optional host-agent adapters.
+- **Host adapter** — a thin integration for one coding-agent host. It translates Anchor’s portable protocol into native commands, skills, hooks, MCP tools, or instruction files when that host supports them.
 - **Project** — a repository connected through `anchor init` or `anchor add`.
 - **Task** — a bounded change with a brief, state, workflow, decisions, evidence, and outcome.
 - **Brief** — the engineer-authored outcome, scope, constraints, invariant or acceptance case, and main uncertainty.
