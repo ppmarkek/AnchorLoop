@@ -8,27 +8,27 @@ description: Guides agents through AnchorLoop's engineer-controlled, local workf
 AnchorLoop is agent-neutral. This skill is only a thin adapter: the local
 command runner and the project's `.anchor/` directory are the source of truth.
 
-The installer supplies `{{ANCHOR_COMMAND}}` as the command runner. Use that
+The installer supplies `npx --yes anchorloop@0.1.0` as the command runner. Use that
 exact prefix for every AnchorLoop command below. Do not replace a pinned npx
 runner with `@latest`, add a project-local npm cache, or install packages into
 the repository.
 
 ## First action
 
-1. Run `{{ANCHOR_COMMAND}} status` from the project root.
+1. Run `npx --yes anchorloop@0.1.0 status` from the project root.
 2. Read `.anchor/next-action.md` when it exists.
 3. Follow only the action allowed by the recorded task state.
 
-If AnchorLoop is not configured, explain that `{{ANCHOR_COMMAND}} add --apply` will create
+If AnchorLoop is not configured, explain that `npx --yes anchorloop@0.1.0 add --apply` will create
 project-local state. Do not create it unless the engineer has asked for setup.
 
 ## Engineer-owned gates
 
 Do not impersonate an engineer or claim that a human has approved work.
 
-- Do not run `{{ANCHOR_COMMAND}} approve`, `{{ANCHOR_COMMAND}} rules approve`,
-  `{{ANCHOR_COMMAND}} rules supersede`, `{{ANCHOR_COMMAND}} verify`, or
-  `{{ANCHOR_COMMAND}} close`, or `{{ANCHOR_COMMAND}} outcome` unless the engineer explicitly asks for
+- Do not run `npx --yes anchorloop@0.1.0 approve`, `npx --yes anchorloop@0.1.0 rules approve`,
+  `npx --yes anchorloop@0.1.0 rules supersede`, `npx --yes anchorloop@0.1.0 verify`, or
+  `npx --yes anchorloop@0.1.0 close`, or `npx --yes anchorloop@0.1.0 outcome` unless the engineer explicitly asks for
   that exact recorded action.
 - `--by` is an audit attribution, not proof of identity. Preserve the supplied
   provenance and do not invent it.
@@ -43,15 +43,15 @@ mode. For a normal `STANDARD` task, obtain the engineer's actual plan inputs;
 never invent the human artifact or comprehension statement:
 
 ~~~text
-{{ANCHOR_COMMAND}} start "short task title"
-{{ANCHOR_COMMAND}} brief --by "Engineer name" --outcome "..." --scope "..." --constraints "..." --invariant "..." --uncertainty "..."
-{{ANCHOR_COMMAND}} plan --summary "..." --mode AUTO --task-type "..." --approach "..." --alternative "..." --risk "..." --verification "..." --human-artifact "..." --comprehension "..." --by "Engineer name"
-{{ANCHOR_COMMAND}} approve --by "Engineer name"
-{{ANCHOR_COMMAND}} implement
-{{ANCHOR_COMMAND}} review
-{{ANCHOR_COMMAND}} precommit
-{{ANCHOR_COMMAND}} verify --by "Engineer name" --result pass --reason "..." --recall "..."
-{{ANCHOR_COMMAND}} close
+npx --yes anchorloop@0.1.0 start "short task title"
+npx --yes anchorloop@0.1.0 brief --by "Engineer name" --outcome "..." --scope "..." --constraints "..." --invariant "..." --uncertainty "..."
+npx --yes anchorloop@0.1.0 plan --summary "..." --mode AUTO --task-type "..." --approach "..." --alternative "..." --risk "..." --verification "..." --human-artifact "..." --comprehension "..." --by "Engineer name"
+npx --yes anchorloop@0.1.0 approve --by "Engineer name"
+npx --yes anchorloop@0.1.0 implement
+npx --yes anchorloop@0.1.0 review
+npx --yes anchorloop@0.1.0 precommit
+npx --yes anchorloop@0.1.0 verify --by "Engineer name" --result pass --reason "..." --recall "..."
+npx --yes anchorloop@0.1.0 close
 ~~~
 
 `AUTO` recommends `FAST` only for low-risk documentation/chore work,
@@ -66,31 +66,31 @@ decision note, or similar piece of reasoning. `--comprehension` and verify's
 `--recall` are the engineer's own explanations. Ask for missing input and keep
 the gate pending; do not generate answers on the engineer's behalf.
 
-If verification fails, preserve the failure and use `{{ANCHOR_COMMAND}} revise` to return
-to implementation or planning. If code changes after `{{ANCHOR_COMMAND}} precommit`, rerun
+If verification fails, preserve the failure and use `npx --yes anchorloop@0.1.0 revise` to return
+to implementation or planning. If code changes after `npx --yes anchorloop@0.1.0 precommit`, rerun
 review and the quality gate before verification.
 
 After a `CAREFUL` task closes, AnchorLoop schedules recall **24 hours after
-that close time**. Run `{{ANCHOR_COMMAND}} status` and inspect
+that close time**. Run `npx --yes anchorloop@0.1.0 status` and inspect
 `pending_recalls` (or the closed task's `recall_due_at`). When that time has
 passed and the engineer explicitly supplies a response, record delayed recall
-with `{{ANCHOR_COMMAND}} recall --task <id> --by "Engineer name" --response
+with `npx --yes anchorloop@0.1.0 recall --task <id> --by "Engineer name" --response
 "..." --score <0-5>`. Never backdate, fabricate, or auto-complete recall.
 
 Only when the engineer supplies an observed follow-up, record defects,
-rollback, corrective refactor, and notes with `{{ANCHOR_COMMAND}} outcome`.
-`{{ANCHOR_COMMAND}} report --format json|csv` is read-only and aggregates local
+rollback, corrective refactor, and notes with `npx --yes anchorloop@0.1.0 outcome`.
+`npx --yes anchorloop@0.1.0 report --format json|csv` is read-only and aggregates local
 closed-task pilot fields; treat reported time/token/model/outcome values as
 audit data, not trusted provider telemetry.
 
 ## Rules and evidence
 
-- Treat rules as inactive until the engineer records `{{ANCHOR_COMMAND}} rules approve`.
+- Treat rules as inactive until the engineer records `npx --yes anchorloop@0.1.0 rules approve`.
 - Never replace an active rule silently; use the explicit supersede command
   only with an engineer-provided reason.
 - Keep the patch within the recorded brief and surface a changed scope before
   editing code.
-- Use `{{ANCHOR_COMMAND}} precommit` before asking the engineer to verify behaviour.
+- Use `npx --yes anchorloop@0.1.0 precommit` before asking the engineer to verify behaviour.
 - Treat generated cache as local-only: never stage or commit it. Before a
   cache-producing tool runs, verify that its exact output path is ignored by
   Git; follow the cache policy in the workflow reference.

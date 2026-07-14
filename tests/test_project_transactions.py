@@ -69,6 +69,95 @@ class ProjectTransactionIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(list((root / ".anchor" / "outbox").glob("*.json")), [])
 
+    def test_recovery_stops_a_retried_rule_proposal_before_it_duplicates_work(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = AnchorProject.at(root)
+            project.apply_setup("add")
+            proposal_id = "rule-security-recovered"
+            proposal_path = root / ".anchor" / "rules" / "proposals" / f"{proposal_id}.json"
+            existing_proposals = {
+                path.name for path in (root / ".anchor" / "rules" / "proposals").glob("*.json")
+            }
+            document = project._rule_document(
+                proposal_id,
+                "security",
+                "Recover the original proposal exactly once.",
+                source="recovery fixture",
+            )
+            with ProjectLock(root, purpose="test.prepare-recovered-proposal"):
+                manager = TransactionManager(root)
+                transaction = manager.begin(
+                    transaction_id="recovered-rule-proposal",
+                    command="rule.propose",
+                )
+                transaction.write_json(proposal_path, document)
+                transaction.emit_event(
+                    {"type": "rule.proposed", "rule_id": proposal_id, "at": "fixture"}
+                )
+                record = manager._record_for(transaction)
+                manager._ensure_directories()
+                manager._write_json(manager._pending_path(transaction.transaction_id), record)
+
+            with self.assertRaisesRegex(
+                AnchorError,
+                r"recovered-rule-proposal \(rule\.propose\).*was not run",
+            ):
+                AnchorProject.at(root).propose_rule(
+                    "security",
+                    "This retry must not create a second proposal.",
+                )
+
+            proposals = {
+                path.name for path in (root / ".anchor" / "rules" / "proposals").glob("*.json")
+            }
+            self.assertEqual(proposals, existing_proposals | {proposal_path.name})
+            events = [
+                json.loads(line)
+                for line in (root / ".anchor" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            recovered = [
+                event
+                for event in events
+                if event.get("type") == "rule.proposed" and event.get("rule_id") == proposal_id
+            ]
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(
+                list((root / ".anchor" / "transactions" / "pending").glob("*.json")),
+                [],
+            )
+
+    def test_doctor_reports_manual_resolution_for_a_post_crash_file_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = AnchorProject.at(root)
+            project.apply_setup("add")
+            target = root / ".gitignore"
+            original = target.read_bytes()
+            with ProjectLock(root, purpose="test.prepare-doctor-conflict"):
+                manager = TransactionManager(root)
+                transaction = manager.begin(
+                    transaction_id="doctor-post-crash-edit",
+                    command="project.setup",
+                )
+                transaction.write_bytes(target, original + b"/.anchor/cache/\n")
+                record = manager._record_for(transaction)
+                manager._ensure_directories()
+                manager._write_json(manager._pending_path(transaction.transaction_id), record)
+                user_edit = original + b"local-user-policy/\n"
+                target.write_bytes(user_edit)
+
+            result = AnchorProject.at(root).doctor(repair=True)
+
+            recovery = next(check for check in result["checks"] if check["name"] == "transaction-recovery")
+            self.assertEqual(recovery["status"], "failed")
+            self.assertIn("manual", recovery["detail"])
+            self.assertIn("refused to overwrite", recovery["detail"])
+            self.assertEqual(target.read_bytes(), user_edit)
+            self.assertTrue(
+                (root / ".anchor" / "transactions" / "pending" / "doctor-post-crash-edit.json").is_file()
+            )
+
     def test_parallel_start_creates_exactly_one_active_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

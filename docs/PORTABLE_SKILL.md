@@ -6,22 +6,35 @@ engine and it never becomes the source of truth for task state.
 
 ## Install
 
-For a Codex project with Node.js 18+ and Python 3.11+, the npm shortcut is the
-fastest route:
-
-> The public npm package is not published yet. Until the signed-tag release
-> workflow succeeds, this command returns `E404`; use the standalone Git
-> installation and do not substitute a similarly named package.
+For Node.js 18+ and Python 3.11+, the npm shortcut is the fastest route:
 
 ~~~powershell
 npx anchorloop install
 ~~~
 
-It installs `.codex/skills/anchorloop/` and renders the skill with a pinned
-`npx --yes anchorloop@<version>` runner. The runner packages the Python source,
-so it can execute later AnchorLoop commands without a globally installed
-`anchor` executable. It never writes `node_modules`, a Python bytecode cache,
-or a workflow cache into the project.
+In an interactive terminal this opens a guided installer: choose the current
+project or your user profile; user-global setup then offers Codex, Cursor,
+Gemini CLI, Claude Code, OpenCode, the cross-framework Agent Skills standard,
+or all native agent locations. The installer shows every destination and asks for a
+final confirmation before it writes files.
+
+Project setup uses `.agents/skills/anchorloop/`. Global setup writes the
+selected host's native directory, such as `~/.codex/skills/anchorloop/` or
+`~/.gemini/skills/anchorloop/`; OpenCode uses
+`~/.config/opencode/skills/anchorloop/`. Every copy renders the skill with a
+pinned `npx --yes anchorloop@<version>` runner. The runner packages the Python
+source, so it can execute later AnchorLoop commands without a globally
+installed `anchor` executable. It never writes `node_modules`, a Python bytecode
+cache, or a workflow cache into the project.
+
+For repeatable scripts, choose scope and destination explicitly:
+
+~~~powershell
+npx anchorloop install --project --platform codex
+npx anchorloop install --global --platform gemini
+npx anchorloop install --global --all
+npx anchorloop install --global --all --preview
+~~~
 
 For a project-scoped installation, AnchorLoop rejects symlink and Windows
 reparse-point components in `.codex/`, `.agents/`, `skills/`, and the skill
@@ -31,15 +44,18 @@ this filesystem boundary.
 For the standalone Python CLI, explicitly apply a previewed skill installation:
 
 ~~~powershell
-# Cross-framework Agent Skills location (recommended)
+# Guided terminal setup
+anchor install --interactive
+
+# Explicit cross-framework project installation
 anchor install --project --platform agents --apply
 
-# Explicit host-specific location
-anchor install --project --platform codex --apply
+# Explicit global multi-agent installation
+anchor install --global --all --apply
 ~~~
 
-Without `--project`, the same command installs into the current user's
-`.agents/skills/anchorloop/` or `.codex/skills/anchorloop/` directory.
+Without `--project`, the standalone command targets the current user's skill
+directory. Use `--global` when you want that scope to be explicit.
 
 The copied package contains:
 

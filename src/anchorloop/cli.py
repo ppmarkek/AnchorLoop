@@ -5,12 +5,19 @@ import csv
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from .command import command_prefix, display_command
 from .project import AnchorError, AnchorProject, TASK_MODES, TASK_TRANSITIONS
-from .skill_install import SUPPORTED_PLATFORMS, SUPPORTED_SKILL_RUNTIMES, SkillInstaller
+from .skill_install import (
+    DEFAULT_PROJECT_PLATFORM,
+    SUPPORTED_PLATFORMS,
+    SUPPORTED_SKILL_RUNTIMES,
+    SkillInstaller,
+    platform_label,
+)
 from .version import VERSION
 
 
@@ -175,9 +182,15 @@ def build_parser() -> argparse.ArgumentParser:
             name,
             help=f"Preview or {name} the portable AnchorLoop skill adapter",
         )
-        command.add_argument("--project", action="store_true", help="Use the current project's skill directory")
-        command.add_argument("--platform", choices=SUPPORTED_PLATFORMS, default="agents")
-        command.add_argument("--apply", action="store_true", help=f"Apply the shown {name} operation")
+        scope = command.add_mutually_exclusive_group()
+        scope.add_argument("--project", action="store_true", help="Use the current project's skill directory")
+        scope.add_argument("--global", dest="global_install", action="store_true", help="Use your user-level skill directory")
+        target = command.add_mutually_exclusive_group()
+        target.add_argument("--platform", choices=SUPPORTED_PLATFORMS)
+        target.add_argument("--all", dest="all_platforms", action="store_true", help="Target every supported user-global agent")
+        mode = command.add_mutually_exclusive_group()
+        mode.add_argument("--apply", action="store_true", help=f"Apply the shown {name} operation")
+        mode.add_argument("--preview", action="store_true", help="Show the operation without writing files")
         command.add_argument(
             "--force",
             action="store_true",
@@ -188,6 +201,11 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
         if name == "install":
+            command.add_argument(
+                "--interactive",
+                action="store_true",
+                help="Open the guided project/global installer (requires a terminal)",
+            )
             command.add_argument(
                 "--skill-runtime",
                 choices=SUPPORTED_SKILL_RUNTIMES,
@@ -455,46 +473,350 @@ def _run_rules(project: AnchorProject, args: argparse.Namespace) -> int:
     return 1
 
 
+_GLOBAL_INSTALL_MENU_PLATFORMS = ("codex", "cursor", "gemini", "claude", "opencode")
+_INTERACTIVE_GLOBAL_PLATFORMS = (*_GLOBAL_INSTALL_MENU_PLATFORMS, "agents")
+
+
+@dataclass(frozen=True)
+class _SkillInstallSelection:
+    project_scoped: bool
+    platforms: tuple[str, ...]
+    apply: bool
+
+
 def _run_skill_install(args: argparse.Namespace, root: Path) -> int:
     installer = SkillInstaller(root)
     if args.command == "install":
-        runtime = args.skill_runtime
-        npx_package = args.npx_package
-        preview = installer.preview_install(
-            platform=args.platform,
-            project_scoped=args.project,
-            runtime=runtime,
-            npx_package=npx_package,
+        if _should_open_skill_installer(args):
+            selection = _interactive_skill_install_selection(args, installer)
+            if selection is None:
+                return 0
+            previews = _install_previews(
+                installer,
+                platforms=selection.platforms,
+                project_scoped=selection.project_scoped,
+                runtime=args.skill_runtime,
+                npx_package=args.npx_package,
+            )
+            _print_skill_previews(previews)
+            if not selection.apply:
+                print("\nPreview only. Nothing was written.")
+                return 0
+            return _apply_skill_installations(
+                installer,
+                platforms=selection.platforms,
+                project_scoped=selection.project_scoped,
+                runtime=args.skill_runtime,
+                npx_package=args.npx_package,
+                force=args.force,
+            )
+
+        project_scoped = args.project
+        platforms = _skill_platforms(args)
+        previews = _install_previews(
+            installer,
+            platforms=platforms,
+            project_scoped=project_scoped,
+            runtime=args.skill_runtime,
+            npx_package=args.npx_package,
         )
+        _print_skill_previews(previews)
         if not args.apply:
-            print("\n".join(preview.lines()))
             print(_skill_apply_instruction(args, root))
             return 0
-        installation = installer.install(
-            platform=args.platform,
-            project_scoped=args.project,
-            runtime=runtime,
-            npx_package=npx_package,
+        return _apply_skill_installations(
+            installer,
+            platforms=platforms,
+            project_scoped=project_scoped,
+            runtime=args.skill_runtime,
+            npx_package=args.npx_package,
             force=args.force,
         )
+
+    project_scoped = args.project
+    platforms = _skill_platforms(args)
+    previews = [
+        installer.preview_uninstall(platform=platform, project_scoped=project_scoped)
+        for platform in platforms
+    ]
+    _print_skill_previews(previews)
+    if not args.apply:
+        print(_skill_apply_instruction(args, root))
+        return 0
+    return _apply_skill_uninstallations(
+        installer,
+        platforms=platforms,
+        project_scoped=project_scoped,
+        force=args.force,
+    )
+
+
+def _skill_platforms(args: argparse.Namespace) -> tuple[str, ...]:
+    if args.all_platforms:
+        if args.project:
+            raise AnchorError("--all is available only for a user-global installation; omit --project or use --global.")
+        return _GLOBAL_INSTALL_MENU_PLATFORMS
+    return (args.platform or DEFAULT_PROJECT_PLATFORM,)
+
+
+def _should_open_skill_installer(args: argparse.Namespace) -> bool:
+    if args.interactive:
+        if args.platform or args.all_platforms:
+            raise AnchorError("--interactive chooses agent destinations; do not combine it with --platform or --all.")
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise AnchorError("The guided installer requires an interactive terminal. Use --project/--global and --platform instead.")
+        return True
+    return (
+        sys.stdin.isatty()
+        and sys.stdout.isatty()
+        and not args.apply
+        and not args.preview
+        and not args.platform
+        and not args.all_platforms
+    )
+
+
+def _interactive_skill_install_selection(
+    args: argparse.Namespace,
+    installer: SkillInstaller,
+) -> _SkillInstallSelection | None:
+    _print_skill_installer_banner()
+    project_scoped = _interactive_install_scope(args)
+    if project_scoped is None:
+        print("Setup cancelled. Nothing was written.")
+        return None
+
+    if project_scoped:
+        platforms = (DEFAULT_PROJECT_PLATFORM,)
+        print(
+            "\nProject installs use the shared Agent Skills standard so compatible agents can discover "
+            "the same project workflow."
+        )
+    else:
+        platforms = _interactive_global_platforms(installer)
+        if platforms is None:
+            print("Setup cancelled. Nothing was written.")
+            return None
+
+    print("\nYour installation plan:")
+    for platform in platforms:
+        destination = installer.destination_for(platform=platform, project_scoped=project_scoped)
+        print(f"  {_skill_symbol('•', '-')} {platform_label(platform):<22} {destination}")
+    print("\nOnly AnchorLoop-owned skill files will be written. No project state, source code, or cache is created.")
+
+    if args.preview:
+        return _SkillInstallSelection(project_scoped=project_scoped, platforms=platforms, apply=False)
+    if not _confirm_skill_installation():
+        print("Setup cancelled. Nothing was written.")
+        return None
+    return _SkillInstallSelection(project_scoped=project_scoped, platforms=platforms, apply=True)
+
+
+def _interactive_install_scope(args: argparse.Namespace) -> bool | None:
+    if args.project:
+        return True
+    if args.global_install:
+        return False
+    print("\nWhere should AnchorLoop live?")
+    print("  [1] This project   — shared with agents working in this repository")
+    print("  [2] My profile     — available in every project for selected agents")
+    print("  [Q] Cancel")
+    choice = _read_skill_choice("Choose 1, 2, or Q", {"1", "2", "q"})
+    if choice == "q":
+        return None
+    return choice == "1"
+
+
+def _interactive_global_platforms(installer: SkillInstaller) -> tuple[str, ...] | None:
+    print("\nWhich agents should receive AnchorLoop?")
+    print("  [1] All native agent locations")
+    for number, platform in enumerate(_INTERACTIVE_GLOBAL_PLATFORMS, start=2):
+        destination = installer.destination_for(platform=platform, project_scoped=False)
+        print(f"  [{number}] {platform_label(platform):<22} {destination}")
+    print("  [Q] Cancel")
+    choices = {"1", "q"} | {str(number) for number in range(2, len(_INTERACTIVE_GLOBAL_PLATFORMS) + 2)}
+    choice = _read_skill_choice("Choose an agent", choices)
+    if choice == "q":
+        return None
+    if choice == "1":
+        return _GLOBAL_INSTALL_MENU_PLATFORMS
+    return (_INTERACTIVE_GLOBAL_PLATFORMS[int(choice) - 2],)
+
+
+def _print_skill_installer_banner() -> None:
+    if not _skill_unicode_supported():
+        print(_skill_ui_style("+--------------------------------------------------------------+", "36"))
+        print(_skill_ui_style("|  ANCHORLOOP / SKILL SETUP                                   |", "1;36"))
+        print(_skill_ui_style("|  One workflow. Any agent. Your state stays local.           |", "2"))
+        print(_skill_ui_style("+--------------------------------------------------------------+", "36"))
+        return
+    border = "╭──────────────────────────────────────────────────────────────╮"
+    print(_skill_ui_style(border, "36"))
+    print(_skill_ui_style("│  ⚓  ANCHORLOOP / SKILL SETUP                                 │", "1;36"))
+    print(_skill_ui_style("│      One workflow. Any agent. Your state stays local.        │", "2"))
+    print(_skill_ui_style("╰──────────────────────────────────────────────────────────────╯", "36"))
+
+
+def _skill_ui_style(value: str, code: str) -> str:
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR") is not None:
+        return value
+    return f"\033[{code}m{value}\033[0m"
+
+
+def _skill_unicode_supported() -> bool:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        "⚓╭╰│✓×•→›".encode(encoding)
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _skill_symbol(unicode_value: str, ascii_value: str) -> str:
+    return unicode_value if _skill_unicode_supported() else ascii_value
+
+
+def _read_skill_choice(prompt: str, allowed: set[str]) -> str:
+    while True:
+        try:
+            response = input(
+                _skill_ui_style(f"\n{_skill_symbol('›', '>')} {prompt}: ", "1;36")
+            ).strip().lower()
+        except EOFError as error:
+            raise AnchorError("Interactive setup input was not received.") from error
+        if response in allowed:
+            return response
+        expected = ", ".join(sorted(choice.upper() if choice == "q" else choice for choice in allowed))
+        print(f"Please choose one of: {expected}.")
+
+
+def _confirm_skill_installation() -> bool:
+    choice = _read_skill_choice("Install now? [Y/n]", {"", "y", "yes", "n", "no"})
+    return choice in {"", "y", "yes"}
+
+
+def _install_previews(
+    installer: SkillInstaller,
+    *,
+    platforms: tuple[str, ...],
+    project_scoped: bool,
+    runtime: str,
+    npx_package: str | None,
+) -> list[object]:
+    return [
+        installer.preview_install(
+            platform=platform,
+            project_scoped=project_scoped,
+            runtime=runtime,
+            npx_package=npx_package,
+        )
+        for platform in platforms
+    ]
+
+
+def _print_skill_previews(previews: Sequence[object]) -> None:
+    for index, preview in enumerate(previews, start=1):
+        if index > 1:
+            print()
+        if len(previews) > 1:
+            print(f"[{index}/{len(previews)}]")
+        print("\n".join(preview.lines()))
+
+
+def _apply_skill_installations(
+    installer: SkillInstaller,
+    *,
+    platforms: tuple[str, ...],
+    project_scoped: bool,
+    runtime: str,
+    npx_package: str | None,
+    force: bool,
+) -> int:
+    installations = []
+    failures: list[tuple[str, AnchorError]] = []
+    for platform in platforms:
+        try:
+            installations.append(
+                installer.install(
+                    platform=platform,
+                    project_scoped=project_scoped,
+                    runtime=runtime,
+                    npx_package=npx_package,
+                    force=force,
+                )
+            )
+        except AnchorError as error:
+            failures.append((platform, error))
+
+    _print_skill_install_results(installations, failures)
+    return 2 if failures else 0
+
+
+def _apply_skill_uninstallations(
+    installer: SkillInstaller,
+    *,
+    platforms: tuple[str, ...],
+    project_scoped: bool,
+    force: bool,
+) -> int:
+    installations = []
+    failures: list[tuple[str, AnchorError]] = []
+    for platform in platforms:
+        try:
+            installations.append(
+                installer.uninstall(platform=platform, project_scoped=project_scoped, force=force)
+            )
+        except AnchorError as error:
+            failures.append((platform, error))
+
+    _print_skill_uninstall_results(installations, failures)
+    return 2 if failures else 0
+
+
+def _print_skill_install_results(installations: Sequence[object], failures: Sequence[tuple[str, AnchorError]]) -> None:
+    if len(installations) == 1 and not failures:
+        installation = installations[0]
         print(
             f"Installed AnchorLoop {installation.platform} skill "
             f"({installation.version}) at {installation.destination}."
         )
-        return 0
+        return
+    for installation in installations:
+        print(
+            f"{_skill_symbol('✓', 'OK')} {platform_label(installation.platform)} "
+            f"{_skill_symbol('→', '->')} {installation.destination}"
+        )
+    for platform, error in failures:
+        print(
+            f"{_skill_symbol('×', 'X')} {platform_label(platform)} "
+            f"{_skill_symbol('→', '->')} {error}",
+            file=sys.stderr,
+        )
+    if failures:
+        if installations:
+            print("Some destinations were installed; successful destinations were not rolled back.", file=sys.stderr)
+        return
+    print(f"AnchorLoop is ready for {len(installations)} agents.")
 
-    preview = installer.preview_uninstall(platform=args.platform, project_scoped=args.project)
-    if not args.apply:
-        print("\n".join(preview.lines()))
-        print(_skill_apply_instruction(args, root))
-        return 0
-    installation = installer.uninstall(
-        platform=args.platform,
-        project_scoped=args.project,
-        force=args.force,
-    )
-    print(f"Removed AnchorLoop {installation.platform} skill from {installation.destination}.")
-    return 0
+
+def _print_skill_uninstall_results(installations: Sequence[object], failures: Sequence[tuple[str, AnchorError]]) -> None:
+    if len(installations) == 1 and not failures:
+        installation = installations[0]
+        print(f"Removed AnchorLoop {installation.platform} skill from {installation.destination}.")
+        return
+    for installation in installations:
+        print(
+            f"{_skill_symbol('✓', 'OK')} Removed {platform_label(installation.platform)} "
+            f"from {installation.destination}"
+        )
+    for platform, error in failures:
+        print(
+            f"{_skill_symbol('×', 'X')} {platform_label(platform)} "
+            f"{_skill_symbol('→', '->')} {error}",
+            file=sys.stderr,
+        )
+    if failures and installations:
+        print("Successful removals were not rolled back.", file=sys.stderr)
 
 
 def _approval_capture(
@@ -529,8 +851,18 @@ def _skill_apply_command(args: argparse.Namespace) -> str:
     parts = [args.command]
     if args.project:
         parts.append("--project")
-    parts.extend(["--platform", args.platform, "--apply"])
-    if args.command == "install" and args.skill_runtime != "anchor":
+    elif args.global_install:
+        parts.append("--global")
+    if args.all_platforms:
+        parts.append("--all")
+    else:
+        parts.extend(["--platform", args.platform or DEFAULT_PROJECT_PLATFORM])
+    parts.append("--apply")
+    if (
+        args.command == "install"
+        and args.skill_runtime != "anchor"
+        and not command_prefix().startswith("npx --yes ")
+    ):
         parts.extend(["--skill-runtime", args.skill_runtime, "--npx-package", args.npx_package])
     if args.force:
         parts.append("--force")
@@ -568,7 +900,7 @@ def _print_help() -> None:
         "Engineer owns scope, decisions, rules, skills, and acceptance.\n"
         "The agent may write code only after an explicit approval.\n\n"
         f"Setup:   {command} add --apply\n"
-        f"Skill:   {command} install --project --platform agents --apply\n"
+        f"Skill:   {command} install --interactive\n"
         f"Task:    {command} start \"short title\" -> brief -> plan -> approve -> implement -> review -> precommit -> verify -> close\n"
         f"Recall:  {command} recall --task <closed-task-id> --by <engineer> --response <text> --score 0..5\n"
         f"Outcome: {command} outcome --task <closed-task-id> --by <engineer> --defects <n> --rollback yes|no --corrective-refactor yes|no --notes <text>\n"

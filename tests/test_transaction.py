@@ -15,8 +15,10 @@ from anchorloop.safe_fs import AnchorError
 from anchorloop.transaction import (
     DEFAULT_COMPLETED_RECEIPT_RETENTION,
     TransactionError,
+    TransactionRecoveryConflict,
     TransactionManager,
     TransactionRecoveryRequired,
+    _digest,
 )
 
 
@@ -288,6 +290,153 @@ class TransactionTests(unittest.TestCase):
             self.assertEqual(report.recovered_transactions, 1)
             self.assertEqual((root / ".anchor" / "state-b.txt").read_text(encoding="utf-8"), "B\n")
             self.assertEqual(len(self._events(root)), 1)
+
+    def test_recovery_conflict_preserves_post_crash_edit_to_user_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".gitignore"
+            target.write_text("existing-user-rule/\n", encoding="utf-8")
+            with ProjectLock(root):
+                manager = TransactionManager(root)
+                manager._ensure_directories()
+                transaction = manager.begin(
+                    transaction_id="gitignore-post-crash-edit",
+                    command="project.setup",
+                )
+                transaction.write_text(target, "existing-user-rule/\n.anchor/cache/\n")
+                record = manager._record_for(transaction)
+                operation = record["operations"][0]
+                self.assertEqual(operation["before"]["state"], "existing")
+                self.assertIn("content_sha256", operation["before"])
+                self.assertIn("mode", operation["before"])
+                self.assertIn("mode", operation)
+                manager._write_json(manager._pending_path(transaction.transaction_id), record)
+
+                user_edit = "existing-user-rule/\nmy-local-policy/\n"
+                target.write_text(user_edit, encoding="utf-8")
+                with self.assertRaisesRegex(
+                    TransactionRecoveryConflict,
+                    r"refused to overwrite.*manual",
+                ):
+                    manager.recover()
+
+            self.assertEqual(target.read_text(encoding="utf-8"), user_edit)
+            self.assertTrue(
+                (root / ".anchor" / "transactions" / "pending" / "gitignore-post-crash-edit.json").is_file()
+            )
+
+    def test_recovery_conflict_preserves_post_crash_edit_to_delete_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".graphifyignore"
+            target.write_text("initial-rule\n", encoding="utf-8")
+            with ProjectLock(root):
+                manager = TransactionManager(root)
+                manager._ensure_directories()
+                transaction = manager.begin(
+                    transaction_id="delete-post-crash-edit",
+                    command="project.setup",
+                )
+                transaction.delete(target)
+                record = manager._record_for(transaction)
+                operation = record["operations"][0]
+                self.assertEqual(operation["before"]["state"], "existing")
+                self.assertIn("content_sha256", operation["before"])
+                self.assertIn("mode", operation["before"])
+                manager._write_json(manager._pending_path(transaction.transaction_id), record)
+
+                user_edit = "initial-rule\nmanual-override\n"
+                target.write_text(user_edit, encoding="utf-8")
+                with self.assertRaisesRegex(TransactionRecoveryConflict, r"refused to overwrite"):
+                    manager.recover()
+
+            self.assertEqual(target.read_text(encoding="utf-8"), user_edit)
+            self.assertTrue(
+                (root / ".anchor" / "transactions" / "pending" / "delete-post-crash-edit.json").is_file()
+            )
+
+    def test_legacy_pending_journal_fails_closed_unless_state_is_already_desired(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".gitignore"
+            target.write_text("before\n", encoding="utf-8")
+            with ProjectLock(root):
+                manager = TransactionManager(root)
+                manager._ensure_directories()
+                transaction = manager.begin(
+                    transaction_id="legacy-no-before-state",
+                    command="project.setup",
+                )
+                transaction.write_text(target, "desired\n")
+                current = manager._record_for(transaction)
+                legacy_operations = []
+                for operation in current["operations"]:
+                    legacy_operations.append(
+                        {
+                            key: value
+                            for key, value in operation.items()
+                            if key not in {"before", "mode"}
+                        }
+                    )
+                specification = {
+                    "transaction_id": transaction.transaction_id,
+                    "command": transaction.command,
+                    "operations": legacy_operations,
+                    "events": current["events"],
+                }
+                legacy = {
+                    "schema_version": 1,
+                    **specification,
+                    "created_at": current["created_at"],
+                    "spec_digest": _digest(specification),
+                    "journal_digest": _digest(
+                        {**specification, "created_at": current["created_at"]}
+                    ),
+                }
+                manager._write_json(manager._pending_path(transaction.transaction_id), legacy)
+
+                with self.assertRaisesRegex(
+                    TransactionRecoveryConflict,
+                    r"Legacy schema-v1 journal lacks a before-state",
+                ):
+                    manager.recover()
+                self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+
+                # Match the transaction payload byte-for-byte: Path.write_text
+                # newline translation on Windows would otherwise create CRLF.
+                target.write_bytes(b"desired\n")
+                report = manager.recover()
+
+            self.assertEqual(report.recovered_transactions, 1)
+            self.assertEqual(target.read_text(encoding="utf-8"), "desired\n")
+            self.assertFalse(
+                (root / ".anchor" / "transactions" / "pending" / "legacy-no-before-state.json").exists()
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits do not round-trip on Windows")
+    def test_recovery_conflict_preserves_post_crash_mode_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".gitignore"
+            target.write_text("before\n", encoding="utf-8")
+            os.chmod(target, 0o640)
+            with ProjectLock(root):
+                manager = TransactionManager(root)
+                manager._ensure_directories()
+                transaction = manager.begin(
+                    transaction_id="mode-post-crash-edit",
+                    command="project.setup",
+                )
+                transaction.write_text(target, "after\n")
+                record = manager._record_for(transaction)
+                manager._write_json(manager._pending_path(transaction.transaction_id), record)
+
+                os.chmod(target, 0o600)
+                with self.assertRaisesRegex(TransactionRecoveryConflict, r"permissions"):
+                    manager.recover()
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+            self.assertEqual(target.stat().st_mode & 0o7777, 0o600)
 
     def test_process_crash_between_state_write_and_event_is_recoverable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

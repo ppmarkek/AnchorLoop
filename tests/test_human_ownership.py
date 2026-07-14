@@ -196,7 +196,7 @@ class HumanOwnershipTests(unittest.TestCase):
             self.assertIn("task_id,title,mode,task_type", csv_output.getvalue())
             self.assertIn(task_id, csv_output.getvalue())
 
-    def test_careful_mode_schedules_delayed_recall(self) -> None:
+    def test_careful_recall_due_is_24_hours_after_close(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
@@ -205,7 +205,8 @@ class HumanOwnershipTests(unittest.TestCase):
             self.assertEqual(main(_structured_plan(root, mode="CAREFUL")), 0)
 
             task = json.loads((root / ".anchor" / "tasks" / "active.json").read_text(encoding="utf-8"))
-            self.assertIsNotNone(task["comprehension"]["recall_due_at"])
+            self.assertEqual(task["comprehension"]["recall_delay_hours"], 24)
+            self.assertIsNone(task["comprehension"]["recall_due_at"])
             task_id = task["id"]
             self.assertEqual(main(["approve", "--by", "Ada Engineer", "--path", str(root)]), 0)
             for action in ("implement", "review", "precommit"):
@@ -233,6 +234,8 @@ class HumanOwnershipTests(unittest.TestCase):
             closed_path = root / ".anchor" / "tasks" / "closed" / f"{task_id}.json"
             closed = json.loads(closed_path.read_text(encoding="utf-8"))
             due_at = datetime.fromisoformat(closed["comprehension"]["recall_due_at"])
+            closed_at = datetime.fromisoformat(closed["metrics"]["closed_at"])
+            self.assertEqual(due_at, closed_at + timedelta(hours=24))
             status = AnchorProject.at(root).status()
             self.assertEqual(status["pending_recalls"][0]["task_id"], task_id)
             self.assertEqual(status["pending_recalls"][0]["status"], "scheduled")
@@ -244,6 +247,15 @@ class HumanOwnershipTests(unittest.TestCase):
                 datetime.now(UTC) - timedelta(minutes=1)
             ).isoformat()
             closed_path.write_text(json.dumps(tampered), encoding="utf-8")
+            invalid_status = AnchorProject.at(root).status()
+            self.assertEqual(invalid_status["pending_recalls"][0]["status"], "invalid")
+            doctor = AnchorProject.at(root).doctor(strict=True)
+            self.assertTrue(
+                any(
+                    check["name"] == "closed-task-recalls" and check["status"] == "failed"
+                    for check in doctor["checks"]
+                )
+            )
             self.assertEqual(
                 main(
                     [

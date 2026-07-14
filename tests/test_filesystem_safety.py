@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from anchorloop.cli import main
 from anchorloop.project import AnchorError
 from anchorloop.quality import workspace_fingerprint
+from anchorloop.safe_fs import SafeProjectFS
 from anchorloop.skill_install import SkillInstaller
 
 
@@ -32,6 +34,76 @@ class FilesystemSafetyTests(unittest.TestCase):
 
             self.assertEqual(main(["start", "Safe temp write", "--path", str(root)]), 0)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside remains unchanged\n")
+
+    def test_new_file_mode_policy_distinguishes_state_and_portable_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            filesystem = SafeProjectFS(root)
+            state_mode = 0o666 if os.name == "nt" else 0o600
+            portable_mode = 0o666 if os.name == "nt" else 0o644
+
+            self.assertEqual(filesystem.mode_for_write(root / ".anchor" / "config.json"), state_mode)
+            self.assertEqual(filesystem.mode_for_write(root / ".gitignore"), portable_mode)
+            self.assertEqual(
+                filesystem.mode_for_write(root / ".agents" / "skills" / "anchorloop" / "SKILL.md"),
+                portable_mode,
+            )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission semantics are required")
+    def test_atomic_write_preserves_existing_repository_file_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            filesystem = SafeProjectFS(root)
+            for filename in (".gitignore", ".graphifyignore"):
+                with self.subTest(filename=filename):
+                    target = root / filename
+                    target.write_text("old\n", encoding="utf-8")
+                    os.chmod(target, 0o640)
+
+                    filesystem.atomic_write_text(target, "new\n")
+
+                    self.assertEqual(target.read_text(encoding="utf-8"), "new\n")
+                    self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o640)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission semantics are required")
+    def test_setup_preserves_existing_gitignore_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gitignore = root / ".gitignore"
+            gitignore.write_text("coverage/\n", encoding="utf-8")
+            os.chmod(gitignore, 0o640)
+
+            self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
+
+            self.assertIn(".anchor/cache/", gitignore.read_text(encoding="utf-8"))
+            self.assertEqual(stat.S_IMODE(os.stat(gitignore).st_mode), 0o640)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission semantics are required")
+    def test_new_anchor_state_and_portable_assets_use_safe_default_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            self.assertEqual(main(["add", "--path", str(root), "--apply"]), 0)
+            self.assertEqual(stat.S_IMODE(os.stat(root / ".anchor" / "config.json").st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(os.stat(root / ".gitignore").st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(os.stat(root / ".graphifyignore").st_mode), 0o644)
+
+            self.assertEqual(
+                main(
+                    [
+                        "install",
+                        "--project",
+                        "--platform",
+                        "agents",
+                        "--apply",
+                        "--path",
+                        str(root),
+                    ]
+                ),
+                0,
+            )
+            skill = root / ".agents" / "skills" / "anchorloop" / "SKILL.md"
+            self.assertEqual(stat.S_IMODE(os.stat(skill).st_mode), 0o644)
 
     def test_setup_rejects_symlinked_anchor_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -88,7 +160,14 @@ class FilesystemSafetyTests(unittest.TestCase):
     def test_project_skill_install_rejects_symlinked_managed_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            for platform, managed_directory in (("agents", ".agents"), ("codex", ".codex")):
+            for platform, managed_directory in (
+                ("agents", ".agents"),
+                ("codex", ".codex"),
+                ("cursor", ".cursor"),
+                ("gemini", ".gemini"),
+                ("claude", ".claude"),
+                ("opencode", ".opencode"),
+            ):
                 root = base / f"project-{platform}"
                 outside = base / f"outside-{platform}"
                 root.mkdir()

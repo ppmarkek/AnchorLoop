@@ -55,7 +55,7 @@ invoke them automatically.
 |---|---|---|
 | FAST | Familiar, low-risk documentation or chore | Brief, plan, approval, quality result, engineer verification |
 | STANDARD | Ordinary feature/fix work | Chosen approach, rejected alternative, primary risk, verification strategy, engineer-created artifact, baseline comprehension, immediate recall |
-| CAREFUL | Auth, payments, secrets, migrations, concurrency, infrastructure, destructive work, public APIs, new dependencies | STANDARD evidence plus rollback/mitigation and delayed recall scheduled after close |
+| CAREFUL | Auth, payments, secrets, migrations, concurrency, infrastructure, destructive work, public APIs, new dependencies | STANDARD evidence plus rollback/mitigation and delayed recall scheduled 24 hours after close |
 
 An explicit downgrade requires a recorded reason. `--by` is audit attribution,
 not authentication. A trusted host adapter or separate approval channel is
@@ -71,8 +71,8 @@ required before approval identity can be treated as an access-control claim.
    ruleset snapshot, and approval digest.
 5. Changed approved input invalidates approval; changed checked content
    invalidates quality evidence.
-6. A CAREFUL delayed-recall schedule is approval-bound and cannot be backdated
-   by editing a closed task.
+6. A CAREFUL approval binds a 24-hour recall-delay policy; `recall_due_at` is
+   derived from close time and cannot be backdated by editing a closed task.
 7. Agents never fabricate human artifacts, comprehension answers, approval,
    rule activation, verification, close, or delayed recall.
 8. Installer `--force` can replace only AnchorLoop-owned assets and never

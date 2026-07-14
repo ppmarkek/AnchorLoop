@@ -126,10 +126,28 @@ class SafeProjectFS:
         except UnicodeDecodeError as error:
             raise AnchorError(f"Cannot decode managed file: {path}") from error
 
-    def atomic_write_bytes(self, path: Path, content: bytes) -> None:
+    def mode_for_write(self, path: Path) -> int:
+        """Return the mode a write to ``path`` must carry.
+
+        Replacing a file with ``os.replace`` replaces its inode as well.  Keep
+        the existing permission bits when there is a regular-file target, and
+        make the policy for a new managed file explicit instead of inheriting
+        ``mkstemp``'s private 0600 default everywhere.  The returned mode is
+        always the mode that this platform can round-trip through ``stat``;
+        this lets durable transaction journals compare it safely on Windows.
+        """
+
+        candidate = self.validate(path)
+        metadata = self._lstat(candidate)
+        if metadata is not None:
+            self._require_regular_file(candidate, metadata)
+            return stat.S_IMODE(metadata.st_mode)
+        return self._default_file_mode(candidate)
+
+    def atomic_write_bytes(self, path: Path, content: bytes, *, mode: int | None = None) -> None:
         candidate = self.validate(path)
         self.ensure_directory(candidate.parent)
-        self._require_write_target(candidate)
+        target_mode = self.mode_for_write(candidate) if mode is None else self._validate_file_mode(mode)
 
         descriptor: int | None = None
         temporary: Path | None = None
@@ -144,6 +162,7 @@ class SafeProjectFS:
                 descriptor = None
                 stream.write(content)
                 stream.flush()
+                self._set_temporary_mode(stream.fileno(), temporary, temporary_stat, target_mode)
                 os.fsync(stream.fileno())
 
             self._require_unchanged_temporary(temporary, temporary_stat)
@@ -165,15 +184,22 @@ class SafeProjectFS:
                 except OSError:
                     pass
 
-    def atomic_write_text(self, path: Path, content: str, *, encoding: str = "utf-8") -> None:
-        self.atomic_write_bytes(path, content.encode(encoding))
+    def atomic_write_text(
+        self,
+        path: Path,
+        content: str,
+        *,
+        encoding: str = "utf-8",
+        mode: int | None = None,
+    ) -> None:
+        self.atomic_write_bytes(path, content.encode(encoding), mode=mode)
 
     def append_text(self, path: Path, content: str, *, encoding: str = "utf-8") -> None:
         candidate = self.validate(path)
         self.ensure_directory(candidate.parent)
-        self._require_write_target(candidate, allow_missing=True)
+        target_mode = self.mode_for_write(candidate)
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
-        descriptor = self._open_no_follow(candidate, flags)
+        descriptor = self._open_no_follow(candidate, flags, mode=target_mode)
         try:
             with os.fdopen(descriptor, "a", encoding=encoding) as stream:
                 stream.write(content)
@@ -282,12 +308,61 @@ class SafeProjectFS:
         if stat.S_ISLNK(metadata.st_mode) or (reparse_point and attributes & reparse_point):
             raise AnchorError(f"Refusing symlink or reparse-point managed path: {path}")
 
-    def _open_no_follow(self, path: Path, flags: int) -> int:
+    def _open_no_follow(self, path: Path, flags: int, *, mode: int = 0o600) -> int:
         no_follow = getattr(os, "O_NOFOLLOW", 0)
         try:
-            return os.open(path, flags | no_follow, 0o600)
+            return os.open(path, flags | no_follow, mode)
         except OSError as error:
             raise AnchorError(f"Cannot safely open managed file: {path}") from error
+
+    def _default_file_mode(self, path: Path) -> int:
+        if os.name == "nt":
+            # Python's POSIX-looking chmod bits do not model Windows ACLs.  A
+            # new regular file round-trips through stat as 0666 (or 0444 when
+            # read-only), so record that effective mode rather than a 0600 or
+            # 0644 request that a recovery comparison can never observe.
+            # Native ACL inheritance remains responsible for access control.
+            return 0o666
+
+        relative = path.relative_to(self.root)
+        if self.root.name == ".anchor" or (relative.parts and relative.parts[0] == ".anchor"):
+            # State, journals, locks, and event evidence may contain local
+            # workflow information; do not make a new state file group/world
+            # readable merely because it is written atomically.
+            return 0o600
+        # Repository metadata and portable skill assets should retain the
+        # conventional shareable-file default instead of mkstemp's 0600.
+        return 0o644
+
+    @staticmethod
+    def _validate_file_mode(mode: int) -> int:
+        if not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o7777:
+            raise AnchorError("Managed file mode must be a permission bitmask.")
+        return mode
+
+    @staticmethod
+    def _set_temporary_mode(
+        descriptor: int,
+        path: Path,
+        expected: os.stat_result | None,
+        mode: int,
+    ) -> None:
+        """Set permissions without opening a replacement path when possible."""
+
+        try:
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(descriptor, mode)
+                return
+
+            # Windows builds without fchmod need a path-based fallback.  Check
+            # identity both before and after so a swapped temp name is never
+            # chmod'ed and committed.
+            SafeProjectFS._require_unchanged_temporary(path, expected)
+            os.chmod(path, mode)
+            SafeProjectFS._require_unchanged_temporary(path, expected)
+        except OSError as error:
+            raise AnchorError(f"Cannot set managed file permissions: {path}") from error
 
     @staticmethod
     def _require_unchanged_temporary(path: Path, expected: os.stat_result | None) -> None:

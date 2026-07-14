@@ -17,7 +17,15 @@ from .project_lock import ProjectLock
 from .safe_fs import AnchorError, SafeProjectFS
 
 
-TRANSACTION_SCHEMA_VERSION = 1
+# Schema v2 adds compare-and-apply preconditions to every filesystem
+# operation.  A durable redo record must never overwrite a file which was
+# edited after the process that prepared it died.
+TRANSACTION_SCHEMA_VERSION = 2
+LEGACY_TRANSACTION_SCHEMA_VERSION = 1
+SUPPORTED_TRANSACTION_SCHEMA_VERSIONS = {
+    LEGACY_TRANSACTION_SCHEMA_VERSION,
+    TRANSACTION_SCHEMA_VERSION,
+}
 DEFAULT_COMPLETED_RECEIPT_RETENTION = 128
 TRANSACTION_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 WINDOWS_RESERVED_NAMES = {
@@ -40,6 +48,10 @@ class TransactionRecoveryRequired(TransactionError):
     """Raised after durable preparation when replay did not finish."""
 
 
+class TransactionRecoveryConflict(TransactionRecoveryRequired):
+    """Raised when recovery would overwrite a post-crash filesystem change."""
+
+
 @dataclass(frozen=True)
 class TransactionResult:
     transaction_id: str
@@ -49,10 +61,30 @@ class TransactionResult:
 
 
 @dataclass(frozen=True)
+class RecoveredTransaction:
+    """One durable transaction which recovery completed or finalized."""
+
+    transaction_id: str
+    command: str | None
+    disposition: str
+
+
+@dataclass(frozen=True)
 class RecoveryReport:
     recovered_transactions: int
     already_committed_transactions: int
     delivered_events: int
+    transactions: tuple[RecoveredTransaction, ...] = ()
+
+    @property
+    def performed_work(self) -> bool:
+        """Whether recovery changed durable state before the caller continued."""
+
+        return bool(
+            self.recovered_transactions
+            or self.already_committed_transactions
+            or self.delivered_events
+        )
 
 
 @dataclass(frozen=True)
@@ -269,6 +301,7 @@ class TransactionManager:
         ProjectLock.assert_held(self.root)
         self._ensure_directories()
         recovered_records: list[tuple[Path, dict[str, Any]]] = []
+        recovered_details: list[RecoveredTransaction] = []
         already_committed = 0
 
         pending = [
@@ -286,6 +319,13 @@ class TransactionManager:
                 self.fs.unlink(pending_path)
                 _fsync_directory(pending_path.parent)
                 already_committed += 1
+                recovered_details.append(
+                    RecoveredTransaction(
+                        transaction_id=identifier,
+                        command=record["command"],
+                        disposition="already-committed",
+                    )
+                )
                 continue
 
             self._stage_record(record)
@@ -294,7 +334,19 @@ class TransactionManager:
         delivered = self._flush_outbox()
         for pending_path, record in recovered_records:
             self._write_receipt_and_finish(record, pending_path)
-        report = RecoveryReport(len(recovered_records), already_committed, delivered)
+            recovered_details.append(
+                RecoveredTransaction(
+                    transaction_id=record[TRANSACTION_ID_KEY],
+                    command=record["command"],
+                    disposition="replayed",
+                )
+            )
+        report = RecoveryReport(
+            len(recovered_records),
+            already_committed,
+            delivered,
+            tuple(recovered_details),
+        )
         self._prune_completed_receipts()
         return report
 
@@ -320,10 +372,11 @@ class TransactionManager:
             payload[TRANSACTION_ID_KEY] = transaction.transaction_id
             events.append(payload)
 
+        operations = [self._prepare_operation(operation) for operation in transaction.operations]
         specification = {
             TRANSACTION_ID_KEY: transaction.transaction_id,
             "command": transaction.command,
-            "operations": list(transaction.operations),
+            "operations": operations,
             "events": events,
         }
         created_at = _timestamp()
@@ -331,8 +384,41 @@ class TransactionManager:
             "schema_version": TRANSACTION_SCHEMA_VERSION,
             **specification,
             "created_at": created_at,
-            "spec_digest": _digest(specification),
+            # The intent digest deliberately excludes the before-state.  This
+            # lets a caller safely retry the same completed transaction ID,
+            # while journal_digest authenticates the full compare-and-apply
+            # record used for recovery.
+            "spec_digest": _digest(self._intent_specification(specification)),
             "journal_digest": _digest({**specification, "created_at": created_at}),
+        }
+
+    def _prepare_operation(self, operation: dict[str, Any]) -> dict[str, Any]:
+        """Bind a user-visible file operation to its exact current state."""
+
+        prepared = _json_copy(operation, label="Transaction operation")
+        path = self.fs.path(prepared["path"])
+        before = self._path_state(path)
+        prepared["before"] = before
+        if prepared["kind"] == "write":
+            # The mode is an after-state too: a chmod between a crash and
+            # recovery must not be silently overwritten by os.replace.
+            prepared["mode"] = self.fs.mode_for_write(path)
+        return prepared
+
+    @staticmethod
+    def _intent_specification(specification: dict[str, Any]) -> dict[str, Any]:
+        """Return the stable user-requested intent, excluding replay guards."""
+
+        operations = []
+        for operation in specification["operations"]:
+            operations.append(
+                {key: value for key, value in operation.items() if key != "before"}
+            )
+        return {
+            TRANSACTION_ID_KEY: specification[TRANSACTION_ID_KEY],
+            "command": specification["command"],
+            "operations": operations,
+            "events": specification["events"],
         }
 
     def _assert_no_unrelated_recovery(self, identifier: str) -> None:
@@ -357,7 +443,15 @@ class TransactionManager:
         return applied, delivered
 
     def _stage_record(self, record: dict[str, Any]) -> int:
-        applied = sum(1 for operation in record["operations"] if self._apply_operation(operation))
+        applied = 0
+        for operation in record["operations"]:
+            try:
+                applied += int(self._apply_operation(operation))
+            except TransactionRecoveryConflict as error:
+                command = record["command"] or "unknown command"
+                raise TransactionRecoveryConflict(
+                    f"Transaction '{record[TRANSACTION_ID_KEY]}' ({command}) cannot be recovered: {error}"
+                ) from error
         for event in record["events"]:
             self._persist_outbox_event(event, transaction_created_at=record["created_at"])
         return applied
@@ -424,18 +518,87 @@ class TransactionManager:
 
     def _apply_operation(self, operation: dict[str, Any]) -> bool:
         path = self.fs.path(operation["path"])
+        try:
+            current = self._path_state(path)
+        except AnchorError as error:
+            raise TransactionRecoveryConflict(
+                f"Target '{operation['path']}' is no longer a readable regular file. "
+                "AnchorLoop will not overwrite it; resolve the path manually, inspect the "
+                f"pending journal, then run {display_command('doctor --repair')}."
+            ) from error
+
+        # Version 1 records did not retain the prior state.  They can be
+        # finalized if every operation already has its desired effect, but may
+        # never be replayed over an unknown current file.
+        if "before" not in operation:
+            return self._apply_legacy_operation_if_already_applied(operation, current)
+
+        before = operation["before"]
+        desired = self._desired_operation_state(operation)
+        if current == desired:
+            return False
+        if current != before:
+            raise TransactionRecoveryConflict(
+                f"Target '{operation['path']}' changed after durable preparation. "
+                "Its current contents or permissions match neither the journal's before-state "
+                "nor its desired after-state, so AnchorLoop refused to overwrite it. Resolve "
+                "the file and pending journal manually, then run "
+                f"{display_command('doctor --repair')}."
+            )
+
         if operation["kind"] == "delete":
-            if not self.fs.exists(path):
-                return False
             self.fs.unlink(path)
             _fsync_directory(path.parent)
             return True
 
         content = self._decode_operation_content(operation)
-        if self.fs.exists(path) and self.fs.read_bytes(path) == content:
-            return False
-        self.fs.atomic_write_bytes(path, content)
+        self.fs.atomic_write_bytes(path, content, mode=operation["mode"])
         return True
+
+    def _apply_legacy_operation_if_already_applied(
+        self,
+        operation: dict[str, Any],
+        current: dict[str, Any],
+    ) -> bool:
+        if operation["kind"] == "delete" and current == {"state": "missing"}:
+            return False
+        if operation["kind"] == "write":
+            content = self._decode_operation_content(operation)
+            if (
+                current.get("state") == "existing"
+                and current.get("content_size") == len(content)
+                and current.get("content_sha256") == hashlib.sha256(content).hexdigest()
+            ):
+                return False
+        raise TransactionRecoveryConflict(
+            f"Legacy schema-v{LEGACY_TRANSACTION_SCHEMA_VERSION} journal lacks a before-state "
+            f"for '{operation['path']}'. AnchorLoop will not replay it because doing so could "
+            "overwrite a post-crash edit. Resolve the file and pending journal manually, then run "
+            f"{display_command('doctor --repair')}."
+        )
+
+    def _path_state(self, path: Path) -> dict[str, Any]:
+        if not self.fs.exists(path):
+            return {"state": "missing"}
+        if not self.fs.is_file(path):
+            raise TransactionError(f"Transaction target must be a regular file: {path}")
+        content = self.fs.read_bytes(path)
+        return {
+            "state": "existing",
+            "content_size": len(content),
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "mode": self.fs.mode_for_write(path),
+        }
+
+    def _desired_operation_state(self, operation: dict[str, Any]) -> dict[str, Any]:
+        if operation["kind"] == "delete":
+            return {"state": "missing"}
+        return {
+            "state": "existing",
+            "content_size": operation["content_size"],
+            "content_sha256": operation["content_sha256"],
+            "mode": operation["mode"],
+        }
 
     def _persist_outbox_event(self, event: dict[str, Any], *, transaction_created_at: str) -> None:
         event_id = event[EVENT_ID_KEY]
@@ -541,7 +704,8 @@ class TransactionManager:
         }
         if set(record) != expected_keys:
             raise TransactionError(f"Transaction journal fields are invalid at {path}.")
-        if record.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
+        schema_version = record.get("schema_version")
+        if not self._is_supported_schema_version(schema_version):
             raise TransactionError(f"Unsupported transaction journal schema at {path}.")
         identifier = record.get(TRANSACTION_ID_KEY)
         if not isinstance(identifier, str):
@@ -562,7 +726,7 @@ class TransactionManager:
 
         seen_paths: set[str] = set()
         for operation in operations:
-            self._validate_operation(operation, seen_paths, path)
+            self._validate_operation(operation, seen_paths, path, schema_version)
         for index, event in enumerate(events):
             if not isinstance(event, dict):
                 raise TransactionError(f"Transaction event is not an object at {path}.")
@@ -577,7 +741,12 @@ class TransactionManager:
             "operations": operations,
             "events": events,
         }
-        if record.get("spec_digest") != _digest(specification):
+        expected_specification = (
+            specification
+            if schema_version == LEGACY_TRANSACTION_SCHEMA_VERSION
+            else self._intent_specification(specification)
+        )
+        if record.get("spec_digest") != _digest(expected_specification):
             raise TransactionError(f"Transaction journal digest does not match its content at {path}.")
         journal_content = {**specification, "created_at": record["created_at"]}
         if record.get("journal_digest") != _digest(journal_content):
@@ -589,14 +758,30 @@ class TransactionManager:
         operation: Any,
         seen_paths: set[str],
         journal_path: Path,
+        schema_version: int,
     ) -> None:
         if not isinstance(operation, dict) or operation.get("kind") not in {"write", "delete"}:
             raise TransactionError(f"Transaction operation is invalid at {journal_path}.")
-        expected_keys = (
-            {"kind", "path", "content_base64", "content_size", "content_sha256"}
-            if operation["kind"] == "write"
-            else {"kind", "path"}
-        )
+        if schema_version == LEGACY_TRANSACTION_SCHEMA_VERSION:
+            expected_keys = (
+                {"kind", "path", "content_base64", "content_size", "content_sha256"}
+                if operation["kind"] == "write"
+                else {"kind", "path"}
+            )
+        else:
+            expected_keys = (
+                {
+                    "kind",
+                    "path",
+                    "content_base64",
+                    "content_size",
+                    "content_sha256",
+                    "before",
+                    "mode",
+                }
+                if operation["kind"] == "write"
+                else {"kind", "path", "before"}
+            )
         if set(operation) != expected_keys:
             raise TransactionError(f"Transaction operation fields are invalid at {journal_path}.")
         relative = operation.get("path")
@@ -608,6 +793,47 @@ class TransactionManager:
         seen_paths.add(path_key)
         if operation["kind"] == "write":
             self._decode_operation_content(operation)
+        if schema_version != LEGACY_TRANSACTION_SCHEMA_VERSION:
+            self._validate_path_state(operation["before"], journal_path)
+            if operation["kind"] == "write":
+                self._validate_operation_mode(operation["mode"], journal_path)
+
+    @staticmethod
+    def _validate_path_state(state: Any, journal_path: Path) -> None:
+        if not isinstance(state, dict) or not isinstance(state.get("state"), str):
+            raise TransactionError(f"Transaction before-state is invalid at {journal_path}.")
+        if state["state"] == "missing":
+            if set(state) != {"state"}:
+                raise TransactionError(f"Transaction missing before-state is invalid at {journal_path}.")
+            return
+        if state["state"] != "existing" or set(state) != {
+            "state",
+            "content_size",
+            "content_sha256",
+            "mode",
+        }:
+            raise TransactionError(f"Transaction existing before-state is invalid at {journal_path}.")
+        size = state["content_size"]
+        digest = state["content_sha256"]
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise TransactionError(f"Transaction before-state metadata is invalid at {journal_path}.")
+        TransactionManager._validate_operation_mode(state["mode"], journal_path)
+
+    @staticmethod
+    def _validate_operation_mode(mode: Any, journal_path: Path) -> None:
+        if (
+            not isinstance(mode, int)
+            or isinstance(mode, bool)
+            or mode < 0
+            or mode > 0o7777
+        ):
+            raise TransactionError(f"Transaction file mode is invalid at {journal_path}.")
 
     @staticmethod
     def _decode_operation_content(operation: dict[str, Any]) -> bytes:
@@ -638,7 +864,7 @@ class TransactionManager:
         }
         if set(record) != expected_keys:
             raise TransactionError(f"Durable outbox record fields are invalid at {path}.")
-        if record.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
+        if not self._is_supported_schema_version(record.get("schema_version")):
             raise TransactionError(f"Unsupported outbox schema at {path}.")
         event_id = record.get(EVENT_ID_KEY)
         transaction_id = record.get(TRANSACTION_ID_KEY)
@@ -692,7 +918,7 @@ class TransactionManager:
         }
         if (
             set(receipt) != expected_keys
-            or receipt.get("schema_version") != TRANSACTION_SCHEMA_VERSION
+            or not TransactionManager._is_supported_schema_version(receipt.get("schema_version"))
             or receipt.get(TRANSACTION_ID_KEY) != identifier
             or not isinstance(receipt.get("spec_digest"), str)
             or (digest is not None and receipt.get("spec_digest") != digest)
@@ -727,6 +953,14 @@ class TransactionManager:
         if normalized == ".anchor/project.lock":
             raise TransactionError(f"Transaction path is reserved for project locking: {normalized}")
         return normalized
+
+    @staticmethod
+    def _is_supported_schema_version(value: Any) -> bool:
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value in SUPPORTED_TRANSACTION_SCHEMA_VERSIONS
+        )
 
     def _ensure_directories(self) -> None:
         directories = (

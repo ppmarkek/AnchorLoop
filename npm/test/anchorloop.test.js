@@ -11,6 +11,7 @@ const repositoryRoot = path.resolve(__dirname, "..", "..");
 const launcher = path.join(repositoryRoot, "npm", "bin", "anchorloop.js");
 const packageMetadata = require(path.join(repositoryRoot, "package.json"));
 const { readCanonicalVersion } = require(path.join(repositoryRoot, "npm", "scripts", "version.js"));
+const { parseShortcutOptions, shouldOpenGuidedInstaller } = require(launcher);
 
 function runLauncher(args, cwd) {
   return spawnSync(process.execPath, [launcher, ...args], {
@@ -71,6 +72,66 @@ test("the shortcut installs a Codex skill that keeps an npx command runner", () 
   }
 });
 
+test("the terminal shortcut routes to the guided installer and global all-agent setup", () => {
+  assert.equal(
+    shouldOpenGuidedInstaller(["install"], { isTTY: true }, { isTTY: true }),
+    true,
+  );
+  assert.equal(
+    shouldOpenGuidedInstaller(["install", "--global"], { isTTY: true }, { isTTY: true }),
+    true,
+  );
+  assert.equal(
+    shouldOpenGuidedInstaller(["install", "--platform", "codex"], { isTTY: true }, { isTTY: true }),
+    false,
+  );
+
+  assert.deepEqual(
+    parseShortcutOptions("install", [], { interactive: true }),
+    [
+      "install",
+      "--interactive",
+      "--apply",
+      "--skill-runtime",
+      "npx",
+      "--npx-package",
+      `${packageMetadata.name}@${packageMetadata.version}`,
+    ],
+  );
+  assert.deepEqual(
+    parseShortcutOptions("install", ["--global", "--all"]),
+    [
+      "install",
+      "--global",
+      "--all",
+      "--apply",
+      "--skill-runtime",
+      "npx",
+      "--npx-package",
+      `${packageMetadata.name}@${packageMetadata.version}`,
+    ],
+  );
+  assert.throws(
+    () => parseShortcutOptions("install", ["--project", "--all"]),
+    /--all is available only for a global installation/,
+  );
+});
+
+test("npm preview prints a copy-pasteable command without Python-only flags", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anchorloop-preview-"));
+  try {
+    const preview = runLauncher(["install", "--global", "--all", "--preview"], temporaryRoot);
+    assert.equal(preview.status, 0, preview.stderr);
+    assert.match(
+      preview.stdout,
+      new RegExp(`npx --yes ${packageMetadata.name}@${packageMetadata.version} install --global --all --apply`),
+    );
+    assert.doesNotMatch(preview.stdout, /--skill-runtime|--npx-package/);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("the package manifest allowlists the runner and its Python skill assets", () => {
   const pyproject = fs.readFileSync(path.join(repositoryRoot, "pyproject.toml"), "utf8");
   const launcherSource = fs.readFileSync(launcher, "utf8");
@@ -99,4 +160,13 @@ test("the package manifest allowlists the runner and its Python skill assets", (
   assert.equal(fs.existsSync(path.join(repositoryRoot, "src", "anchorloop", "skills", "anchorloop", "SKILL.md")), true);
   assert.equal(fs.existsSync(path.join(repositoryRoot, "src", "anchorloop", "skills", "anchorloop", "references", "workflow.md")), true);
   assert.equal(packageMetadata.files.some((file) => /(?:^|\/)(?:cache|\.cache|node_modules)(?:\/|$)/.test(file)), false);
+  const readme = fs.readFileSync(path.join(repositoryRoot, "README.md"), "utf8");
+  assert.match(
+    readme,
+    /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-delivery-loop\.svg/,
+  );
+  assert.match(
+    readme,
+    /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-evidence-integrity\.svg/,
+  );
 });

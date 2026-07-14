@@ -35,12 +35,12 @@ low-risk documentation/chore work, `STANDARD` for ordinary delivery, and
 concurrency, infrastructure, destructive changes, public APIs, or new
 dependencies. STANDARD and CAREFUL require an engineer-created artifact,
 trade-off reasoning, a verification strategy, and a comprehension statement;
-CAREFUL also schedules delayed recall. An explicit downgrade is visible in the
-task record and requires a reason.
+CAREFUL schedules delayed recall **24 hours after close**. An explicit
+downgrade is visible in the task record and requires a reason.
 
 ## Delivery loop
 
-<img src="docs/assets/anchorloop-delivery-loop.svg" alt="AnchorLoop task flow from task through brief, plan, engineer approval, implementation, review, precommit, verification, and close, with an explicit revision route after failed verification." width="100%">
+<img src="https://raw.githubusercontent.com/ppmarkek/AnchorLoop/main/docs/assets/anchorloop-delivery-loop.svg" alt="AnchorLoop task flow from task through brief, plan, engineer approval, implementation, review, precommit, verification, and close, with an explicit revision route after failed verification." width="100%">
 
 AnchorLoop records the delivery loop: implementation follows an engineer-approved
 plan, and a failed verification returns through an explicit revision rather than
@@ -100,36 +100,37 @@ Every host gets the same task states and approval rules. Native integrations mus
 
 Graphify installation, full language-specific security tooling, project-specific test commands, external research, skill discovery, and native host adapters are planned next. AnchorLoop never installs them silently.
 
-## Install a Codex skill in one command
+## Install as a skill — guided setup
 
 Requirements: Node.js 18 or newer and Python 3.11 or newer.
 
-> **Registry status:** the `anchorloop` npm package is not published yet, so
-> the public command below will return `E404` until the signed-tag release
-> workflow completes successfully. Use the standalone Git installation in the
-> meantime; do not substitute an unverified similarly named package.
-
-From the project you want to use with Codex:
+From any project, run:
 
 ~~~sh
 npx anchorloop install
 ~~~
 
-This creates only `.codex/skills/anchorloop/`; it does not create `.anchor/`,
-modify application code, or add `node_modules` or a cache to the project. The
-installed skill contains a pinned `npx --yes anchorloop@<version>` command
-runner, so selecting **AnchorLoop** through `/` (or writing `$anchorloop`) can
-use every workflow command even after the initial `npx` process exits.
+In a terminal, a compact setup wizard asks where AnchorLoop should live:
 
-The shortcut defaults to the current project's Codex skill location. Use
-`--platform agents` for the cross-framework Agent Skills location, `--global`
-for a user-level installation, or `--preview` to inspect the operation without
-writing files:
+- **This project** installs the portable Agent Skills standard at
+  `.agents/skills/anchorloop/` for compatible agents in the repository.
+- **My profile** lets you choose **Codex**, **Cursor**, **Gemini CLI**,
+  **Claude Code**, **OpenCode**, the shared **Agent Skills standard**, or
+  **all native agents** at once. The shared standard remains separate so a host
+  never discovers the same skill twice.
+
+The wizard shows every destination and asks for confirmation before writing.
+It installs only the thin skill adapter with a pinned
+`npx --yes anchorloop@<version>` runner. It never creates `.anchor/`, modifies
+application code, adds `node_modules`, or stores a cache in the project.
+
+For scripts and CI, use explicit flags instead of the wizard:
 
 ~~~sh
-npx anchorloop install --platform agents
-npx anchorloop install --global
-npx anchorloop install --preview
+npx anchorloop install --project --platform codex
+npx anchorloop install --global --platform gemini
+npx anchorloop install --global --all
+npx anchorloop install --global --all --preview
 ~~~
 
 npm may keep its own user-level download cache; AnchorLoop never writes an npm
@@ -249,10 +250,10 @@ anchor verify --by "Ada Engineer" --result pass --reason "The documented manual 
 anchor close
 ~~~
 
-For a CAREFUL task, add `--rollback-mitigation` to the plan. After close,
-AnchorLoop records `recall_due_at`; once due, the engineer can record delayed
-recall with `anchor recall --task <id> --by "Ada Engineer" --response "..."
---score 0..5`.
+For a CAREFUL task, add `--rollback-mitigation` to the plan. At close,
+AnchorLoop derives `recall_due_at` as **24 hours after the close timestamp**;
+once due, the engineer can record delayed recall with `anchor recall --task
+<id> --by "Ada Engineer" --response "..." --score 0..5`.
 
 If manual verification fails, preserve that evidence and return through an
 explicit revision rather than abandoning the active task:
@@ -308,7 +309,7 @@ file.
 
 ### Evidence that expires when reality changes
 
-<img src="docs/assets/anchorloop-evidence-integrity.svg" alt="AnchorLoop evidence graph showing brief, plan, and ruleset digests feeding approval, and precommit checks plus a workspace fingerprint gating verification and close. Changed artifacts or workspace state invalidate the next gate." width="100%">
+<img src="https://raw.githubusercontent.com/ppmarkek/AnchorLoop/main/docs/assets/anchorloop-evidence-integrity.svg" alt="AnchorLoop evidence graph showing brief, plan, and ruleset digests feeding approval, and precommit checks plus a workspace fingerprint gating verification and close. Changed artifacts or workspace state invalidate the next gate." width="100%">
 
 AnchorLoop records evidence, not identity: a changed approved artifact archives
 the approval, while changed checked code requires review and pre-commit again.

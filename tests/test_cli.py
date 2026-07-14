@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from anchorloop.cli import main
 from anchorloop.quality import workspace_fingerprint
@@ -1109,6 +1110,70 @@ class AnchorCliTests(unittest.TestCase):
             adapter_path = root / ".anchor" / "agents" / "adapters" / "portable.json"
             self.assertTrue(adapter_path.is_file())
             self.assertIn("revise", json.loads(adapter_path.read_text())["commands"])
+
+    def test_global_all_skill_install_uses_each_supported_agent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "user-home"
+            with mock.patch("anchorloop.skill_install.Path.home", return_value=home):
+                self.assertEqual(
+                    main(["install", "--global", "--all", "--apply", "--path", str(root)]),
+                    0,
+                )
+
+                expected = (
+                    (".codex", "skills"),
+                    (".cursor", "skills"),
+                    (".gemini", "skills"),
+                    (".claude", "skills"),
+                    (".config", "opencode", "skills"),
+                )
+                for parts in expected:
+                    self.assertTrue((home.joinpath(*parts) / "anchorloop" / "SKILL.md").is_file())
+
+                self.assertEqual(
+                    main(["uninstall", "--global", "--all", "--apply", "--path", str(root)]),
+                    0,
+                )
+                for parts in expected:
+                    self.assertFalse((home.joinpath(*parts) / "anchorloop").exists())
+
+    def test_guided_installer_selects_global_all_without_creating_project_state(self) -> None:
+        class TtyBuffer(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "user-home"
+            stdout = TtyBuffer()
+            stdin = TtyBuffer()
+            with (
+                mock.patch("anchorloop.skill_install.Path.home", return_value=home),
+                mock.patch("anchorloop.cli.sys.stdin", stdin),
+                mock.patch("anchorloop.cli.sys.stdout", stdout),
+                mock.patch("builtins.input", side_effect=["2", "1", "y"]),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "install",
+                            "--interactive",
+                            "--skill-runtime",
+                            "npx",
+                            "--npx-package",
+                            "anchorloop@0.1.0",
+                            "--path",
+                            str(root),
+                        ]
+                    ),
+                    0,
+                )
+
+            self.assertIn("ANCHORLOOP / SKILL SETUP", stdout.getvalue())
+            self.assertIn("AnchorLoop is ready for 5 agents.", stdout.getvalue())
+            self.assertTrue((home / ".codex" / "skills" / "anchorloop" / "SKILL.md").is_file())
+            self.assertFalse((root / ".anchor").exists())
 
 
 if __name__ == "__main__":

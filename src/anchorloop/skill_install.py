@@ -19,7 +19,58 @@ from .version import VERSION
 
 
 SKILL_NAME = "anchorloop"
-SUPPORTED_PLATFORMS = ("agents", "codex")
+
+
+@dataclass(frozen=True)
+class SkillPlatform:
+    """One supported host's skill discovery locations."""
+
+    key: str
+    label: str
+    project_parts: tuple[str, ...]
+    user_parts: tuple[str, ...]
+
+
+SKILL_PLATFORMS = {
+    "agents": SkillPlatform(
+        key="agents",
+        label="Agent Skills standard",
+        project_parts=(".agents",),
+        user_parts=(".agents",),
+    ),
+    "codex": SkillPlatform(
+        key="codex",
+        label="Codex",
+        project_parts=(".codex",),
+        user_parts=(".codex",),
+    ),
+    "cursor": SkillPlatform(
+        key="cursor",
+        label="Cursor",
+        project_parts=(".cursor",),
+        user_parts=(".cursor",),
+    ),
+    "gemini": SkillPlatform(
+        key="gemini",
+        label="Gemini CLI",
+        project_parts=(".gemini",),
+        user_parts=(".gemini",),
+    ),
+    "claude": SkillPlatform(
+        key="claude",
+        label="Claude Code",
+        project_parts=(".claude",),
+        user_parts=(".claude",),
+    ),
+    "opencode": SkillPlatform(
+        key="opencode",
+        label="OpenCode",
+        project_parts=(".opencode",),
+        user_parts=(".config", "opencode"),
+    ),
+}
+SUPPORTED_PLATFORMS = tuple(SKILL_PLATFORMS)
+DEFAULT_PROJECT_PLATFORM = "agents"
 SKILL_RUNTIME_ANCHOR = "anchor"
 SKILL_RUNTIME_NPX = "npx"
 SUPPORTED_SKILL_RUNTIMES = (SKILL_RUNTIME_ANCHOR, SKILL_RUNTIME_NPX)
@@ -32,6 +83,16 @@ _NPX_PACKAGE_PATTERN = re.compile(
 )
 
 _ReturnT = TypeVar("_ReturnT")
+
+
+def platform_label(platform: str) -> str:
+    """Return a human-readable host name after validating its identifier."""
+
+    try:
+        return SKILL_PLATFORMS[platform].label
+    except KeyError as error:
+        supported = ", ".join(SUPPORTED_PLATFORMS)
+        raise AnchorError(f"Skill platform must be one of: {supported}.") from error
 
 
 def _installation_lock_root(destination: Path) -> Path:
@@ -112,7 +173,7 @@ class SkillInstallPreview:
         scope = "project" if self.project_scoped else "user-global"
         verb = "install or update" if self.action == "install" else "remove"
         lines = [
-            f"AnchorLoop skill {self.action} preview ({scope}, {self.platform})",
+            f"AnchorLoop skill {self.action} preview ({scope}, {platform_label(self.platform)})",
             f"Will {verb} only AnchorLoop-owned skill assets at: {self.destination}",
             "Will not modify .anchor/ workflow state, application source, AGENTS.md, hooks, or Graphify settings.",
             "The installed skill is a thin adapter: the anchor CLI and .anchor/ state remain the source of truth.",
@@ -169,8 +230,9 @@ class SkillInstaller:
     def destination_for(self, *, platform: str, project_scoped: bool) -> Path:
         self._validate_platform(platform)
         filesystem = self._filesystem_for(project_scoped)
-        platform_dir = ".agents" if platform == "agents" else ".codex"
-        return filesystem.path(platform_dir, "skills", SKILL_NAME)
+        definition = SKILL_PLATFORMS[platform]
+        location = definition.project_parts if project_scoped else definition.user_parts
+        return filesystem.path(*location, "skills", SKILL_NAME)
 
     def _filesystem_for(self, project_scoped: bool) -> SafeProjectFS:
         if project_scoped:

@@ -51,5 +51,8 @@
     "prepack": "npm run version:check",
     "pack:check": "npm pack --dry-run",
     "registry:smoke": "node npm/scripts/registry-smoke.js"
+  },
+  "dependencies": {
+    "anchorloop": "^0.1.0"
   }
 }
