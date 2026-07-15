@@ -12,10 +12,11 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 **Unreleased main:** `0.2.0` release candidate
 
-The published `0.1.0` package remains the production version. Current `main`
-contains the unreleased recovery, validation, ownership, release-safety, and
-multi-agent installer work planned for `0.2.0`. Until the signed `v0.2.0` tag
-passes the complete release workflow, do not describe those additions as
+The published `0.1.0` package remains the production version. The current
+release branch contains the unreleased recovery, validation, ownership,
+release-safety, and multi-agent installer work planned for `0.2.0`. Until the
+signed `v0.2.0` tag passes staging, maintainer approval, exact-version registry
+smoke, and interactive `latest` promotion, do not describe those additions as
 available from npm `latest`.
 
 ## Core idea
@@ -42,7 +43,7 @@ downgrade is visible in the task record and requires a reason.
 
 ## Delivery loop
 
-<img src="https://raw.githubusercontent.com/ppmarkek/AnchorLoop/main/docs/assets/anchorloop-delivery-loop.svg" alt="AnchorLoop task flow from task through brief, plan, engineer approval, implementation, review, precommit, verification, and close, with an explicit revision route after failed verification." width="100%">
+<img src="docs/assets/anchorloop-delivery-loop.svg" alt="AnchorLoop task flow from task through brief, plan, engineer approval, implementation, review, precommit, verification, and close, with an explicit revision route after failed verification." width="100%">
 
 AnchorLoop records the delivery loop: implementation follows an engineer-approved
 plan, and a failed verification returns through an explicit revision rather than
@@ -94,10 +95,12 @@ Every host gets the same task states and approval rules. Native integrations mus
   failing health check, and `doctor --repair` explicitly recovers an interrupted
   transaction or torn final event-log entry.
 - Failed verification is preserved and can explicitly return to implementation or planning with `anchor revise`; it no longer strands the active task.
-- The quality gate records a deterministic workspace fingerprint. Verification and close are blocked when the checked code changes afterward.
-- Before `review_ready` and again before `precommit`, AnchorLoop evaluates the
-  actual Git diff. CAREFUL paths block a lower-mode task until the engineer
-  revises the plan or records a path-specific reviewed override.
+- The quality gate records deterministic workspace and Git-snapshot fingerprints. Verification and close are blocked when checked content, `HEAD`, or index state changes afterward.
+- Before `review_ready` and again before `precommit`, AnchorLoop evaluates
+  changes from the task baseline: the actual Git diff when a committed `HEAD`
+  exists, or a deterministic materialized-file fallback in unborn and non-Git
+  workspaces. CAREFUL paths block a lower-mode task until the engineer revises
+  the plan or records a path-specific reviewed override.
 - `anchor init` and `anchor add` preview project setup and require `--apply` before creating files.
 - Setup creates portable `.anchor/` state, baseline **proposed** rules, Graphify integration metadata, a portable agent protocol, and a generated next-action file.
 - The task flow enforces `start → brief → plan → approve → implement → review → precommit → verify → close`.
@@ -119,8 +122,8 @@ npx --yes anchorloop@0.1.0 install --project --platform codex --apply
 ~~~
 
 Do not use an unversioned `npx anchorloop install` command to test the features
-documented below: npm `latest` still resolves to `0.1.0` until the `0.2.0`
-release completes.
+documented below: npm `latest` continues to resolve to `0.1.0` until the
+`0.2.0` release flow completes.
 
 ## Unreleased 0.2.0 guided setup
 
@@ -190,8 +193,9 @@ migration refreshes managed protocol/support files and skill assets while
 preserving task, rule, approval, and audit records. If an installed skill was
 edited locally, review and preserve that diff before using `--force`.
 
-See the [0.1.0 to 0.2.0 migration guide](docs/MIGRATION_0.2.md) for the current
-release-candidate procedure and the exact commands to use after publication.
+See the [0.1.0 to 0.2.0 migration guide](docs/MIGRATION_0.2.md) for the required
+`0.1.0` recovery preflight, release-candidate procedure, and exact commands to
+use after publication.
 
 ## Development from a checkout
 
@@ -333,11 +337,11 @@ It also records that project-specific formatter, linter, type-checker, test-runn
 
 Each successful run stores a SHA-256 fingerprint of the materialized tracked
 and non-ignored untracked files. Git HEAD, index, and diff state are recorded
-separately for diagnostics, so an ordinary commit does not invalidate evidence
-when the checked files are byte-for-byte unchanged. A submodule's checked-out
+as integrity evidence too, so a commit or staging transition requires the gate
+to be rerun even when worktree bytes are restored. A submodule's checked-out
 materialized files are fingerprinted recursively, including nested dirty and
 non-ignored untracked content. An uninitialized submodule is bound to its
-tracked gitlink. If checked content changes before verification or close,
+tracked gitlink. If checked content or authoritative Git state changes before verification or close,
 AnchorLoop returns the task to review and requires a new pre-commit run.
 
 Fingerprint entries are length-framed and store a per-file content digest; a
@@ -346,7 +350,7 @@ file.
 
 ### Evidence that expires when reality changes
 
-<img src="https://raw.githubusercontent.com/ppmarkek/AnchorLoop/main/docs/assets/anchorloop-evidence-integrity.svg" alt="AnchorLoop evidence graph showing brief, plan, and ruleset digests feeding approval, and precommit checks plus a workspace fingerprint gating verification and close. Changed artifacts or workspace state invalidate the next gate." width="100%">
+<img src="docs/assets/anchorloop-evidence-integrity.svg" alt="AnchorLoop evidence graph showing brief, plan, and ruleset digests feeding approval, and precommit checks plus a workspace fingerprint gating verification and close. Changed artifacts or workspace state invalidate the next gate." width="100%">
 
 AnchorLoop records evidence, not identity: a changed approved artifact archives
 the approval, while changed checked code requires review and pre-commit again.

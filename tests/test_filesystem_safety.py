@@ -50,6 +50,54 @@ class FilesystemSafetyTests(unittest.TestCase):
                 portable_mode,
             )
 
+    def test_managed_path_accepts_the_original_root_spelling_after_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            canonical_root = base / "canonical-project"
+            selected_root = base / "selected-project"
+            canonical_root.mkdir()
+            self._symlink_or_skip(canonical_root, selected_root, directory=True)
+            filesystem = SafeProjectFS(selected_root)
+
+            filesystem.atomic_write_text(selected_root / "managed.txt", "managed\n")
+
+            self.assertEqual(
+                (canonical_root / "managed.txt").read_text(encoding="utf-8"),
+                "managed\n",
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 path aliases are required")
+    def test_managed_path_accepts_windows_short_name_root_alias(self) -> None:
+        import ctypes
+
+        with tempfile.TemporaryDirectory() as directory:
+            canonical_root = Path(directory) / "canonical-project-directory"
+            canonical_root.mkdir()
+            get_short_path_name = ctypes.WinDLL(
+                "kernel32",
+                use_last_error=True,
+            ).GetShortPathNameW
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = get_short_path_name(str(canonical_root), buffer, len(buffer))
+            if length == 0 or length >= len(buffer):
+                self.skipTest("Windows short-path aliases are unavailable on this volume")
+            selected_root = Path(buffer.value)
+            if os.path.normcase(str(selected_root)) == os.path.normcase(str(canonical_root)):
+                self.skipTest("Windows did not assign a distinct short-path alias")
+            filesystem = SafeProjectFS(selected_root)
+            outside = canonical_root.parent / "outside.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+
+            filesystem.atomic_write_text(selected_root / "managed.txt", "managed\n")
+
+            self.assertEqual(
+                (canonical_root / "managed.txt").read_text(encoding="utf-8"),
+                "managed\n",
+            )
+            with self.assertRaisesRegex(AnchorError, "escapes the project root"):
+                filesystem.atomic_write_text(selected_root / ".." / "outside.txt", "changed\n")
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
     @unittest.skipUnless(os.name == "posix", "POSIX permission semantics are required")
     def test_atomic_write_preserves_existing_repository_file_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,7 +1,7 @@
 # AnchorLoop
 
 > - **Опубликованный production:** `anchorloop@0.1.0`
-> - **Неопубликованный main:** release candidate `0.2.0`
+> - **Неопубликованный release candidate:** `0.2.0`
 > - До публикации `0.2.0` используйте в production точную команду
 >   `npx --yes anchorloop@0.1.0 ...`. [Инструкция по миграции](../MIGRATION_0.2.md).
 

@@ -3,11 +3,12 @@
 ## Release status
 
 - Published production: `anchorloop@0.1.0`
-- Current repository: unreleased `0.2.0` release candidate
+- Current release branch: unreleased `0.2.0` release candidate
 
-Do not run the registry commands in this guide until `anchorloop@0.2.0` exists
-and its registry smoke has passed. Before publication, use the development
-checkout procedure below.
+Do not run the `0.2.0` registry commands in this guide until that exact version
+exists publicly and its registry smoke has passed. Use exact versions
+throughout the migration, do not replace `.anchor/`, and do not skip the
+`0.1.0` recovery preflight.
 
 ## Compatibility contract
 
@@ -26,20 +27,26 @@ The `0.2.0` setup path:
 - refuses to overwrite a locally modified installed skill unless `--force` is
   explicitly selected after reviewing the diff.
 
-## Before publication: test the release candidate from a checkout
+## Before upgrading: finish any 0.1.0 recovery
 
-From the `release/0.2.0` checkout:
+From each existing AnchorLoop project, first verify the old installation while
+`0.1.0` still owns its recovery format:
 
 ~~~sh
-python -m pip install -e .
-anchor install --project --platform codex --apply
-anchor add --apply
-anchor doctor --strict
+npx --yes anchorloop@0.1.0 doctor --strict
 ~~~
 
-The generated `.codex/skills/anchorloop/` directory is local dogfooding state
-and must not be committed. Use `--platform agents` instead of `codex` when the
-project consumes the cross-framework Agent Skills location.
+If strict inspection reports pending recovery, repair it with `0.1.0` and then
+repeat the strict check:
+
+~~~sh
+npx --yes anchorloop@0.1.0 doctor --repair
+npx --yes anchorloop@0.1.0 doctor --strict
+~~~
+
+Only continue after the final `0.1.0 doctor --strict` succeeds. Preserve its
+output if recovery cannot complete; do not ask `0.2.0` to replay a partially
+applied legacy journal.
 
 ## After publication: upgrade with the exact npm version
 
@@ -52,7 +59,9 @@ npx --yes anchorloop@0.2.0 doctor --strict
 ~~~
 
 Keep commands pinned to `@0.2.0` in automation and installed skill metadata.
-Do not rely on npm `latest` during rollout.
+The pin makes upgrades deliberate and avoids relying on npm `latest` during
+the rollout. Before publication, test the candidate only from a development
+checkout.
 
 ## Locally modified skill files
 
@@ -83,6 +92,6 @@ npx --yes anchorloop@0.2.0 rules supersede <old-rule-id> <new-rule-id> \
 
 Do not delete `.anchor/`, edit its JSON by hand, or downgrade state in place.
 Preserve the checkout and the failing `doctor --strict` output, inspect
-transaction/recovery guidance with `status` and `doctor`, and fix the release
-candidate before creating the signed tag. npm versions and published tags must
+transaction/recovery guidance with `status` and the exact installed `doctor`,
+and resolve the conflict before retrying. npm versions and published tags must
 never be overwritten.

@@ -7,7 +7,8 @@ availability.
 ## 0.2.0 - Unreleased
 
 Published production remains `anchorloop@0.1.0` until the signed `v0.2.0` tag
-passes the complete release workflow.
+is contained in `main` and passes staging, maintainer approval, exact-version
+registry smoke, and interactive `latest` promotion.
 
 ### Added
 
@@ -30,9 +31,11 @@ passes the complete release workflow.
 
 - recovery completes an interrupted project or skill transaction and stops the
   current call without automatically running the newly requested mutation;
-- release publication is OIDC-only and requires a verified signed annotated
-  tag, green exact-tag CI, an unpublished exact npm version, and matching npm
-  `gitHead`;
+- release publication requires a verified signed annotated tag contained in
+  `origin/main`, green exact-tag CI, and an unpublished exact npm version. The
+  exact tarball is staged through OIDC under `next`, inspected and approved by
+  a maintainer with 2FA, smoke-tested by exact public version, checked for a
+  matching npm `gitHead`, and only then promoted interactively to `latest`;
 - generated local skill installations are ignored and are no longer repository
   source of truth;
 - the npm package no longer depends recursively on `anchorloop@0.1.0`.

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact public npm version to verify after staged approval
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,12 +21,14 @@ concurrency:
 jobs:
   exact-tag-ci:
     name: Green CI for tagged commit
+    if: github.event_name == 'push'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   publish-npm:
-    name: Publish npm package
+    name: Stage npm package for human approval
+    if: github.event_name == 'push'
     needs: exact-tag-ci
     runs-on: ubuntu-latest
     environment: npm-release
@@ -109,6 +117,17 @@ jobs:
             exit 1
           }
 
+      - name: Require tagged commit to be merged into main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          tagged_commit="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$tagged_commit" refs/remotes/origin/main || {
+            echo "Release commit ${tagged_commit} is not contained in origin/main." >&2
+            exit 1
+          }
+
       - name: Require the existing npm package identity
         shell: bash
         env:
@@ -125,26 +144,213 @@ jobs:
             exit 1
           }
 
-      - name: Build the exact publishable archive
-        id: archive
+      - name: Prepare time-invariant release artifact documentation
+        id: artifact_docs
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_date="$(git show -s --format=%cs HEAD)"
+          [[ "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+            echo "Tagged commit did not provide a YYYY-MM-DD release date." >&2
+            exit 1
+          }
+          node npm/scripts/finalize-release-docs.js \
+            --version "$VERSION" \
+            --release-date "$release_date"
+          printf 'release_date=%s\n' "$release_date" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release artifact documentation and mutation boundary
+        shell: bash
+        env:
+          RELEASE_DATE: ${{ steps.artifact_docs.outputs.release_date }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          node npm/scripts/finalize-release-docs.js \
+            --check \
+            --version "$VERSION" \
+            --release-date "$RELEASE_DATE"
+
+          if ! git diff --cached --quiet --; then
+            echo "Release documentation preparation staged changes; the index must remain untouched." >&2
+            git diff --cached --name-only -- >&2
+            exit 1
+          fi
+
+          mapfile -d '' -t untracked_paths < <(git ls-files --others --exclude-standard -z)
+          if ((${#untracked_paths[@]})); then
+            printf 'Unexpected untracked release path: %s\n' "${untracked_paths[@]}" >&2
+            exit 1
+          fi
+
+          git diff --exit-code -- \
+            src npm package.json package-lock.json pyproject.toml || {
+              echo "Release documentation preparation changed runtime or release tooling." >&2
+              exit 1
+            }
+
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              README.md|CHANGELOG.md|SECURITY.md|CONTRIBUTING.md|docs/MIGRATION_0.2.md|docs/ANCHOR_DECISION_MAP.md|docs/PORTABLE_SKILL.md|docs/PROJECT_PLAN.md|docs/i18n/README.*.md)
+                ;;
+              *)
+                echo "Unexpected release artifact mutation: ${changed_path}" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only)
+
+      - name: Dry-run package assembly from the finalized checkout
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist-npm
-          npm pack --pack-destination dist-npm
-          mapfile -t archives < <(find dist-npm -maxdepth 1 -type f -name '*.tgz' -print)
-          test "${#archives[@]}" -eq 1 || {
-            echo "Expected exactly one npm tarball, found ${#archives[@]}." >&2
+          npm pack --dry-run --ignore-scripts
+
+      - name: Stage candidate with npm provenance through trusted publishing
+        run: >-
+          npm stage publish .
+          --ignore-scripts
+          --access public
+          --provenance
+          --tag next
+
+      - name: Record the human approval handoff
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Staged npm release"
+            echo
+            echo "${PACKAGE_NAME}@${VERSION} is staged from the signed Git checkout under the next tag."
+            echo "A maintainer must inspect the exact staged artifact with npm stage list/view/download,"
+            echo "then run npm stage approve <stage-id> and complete 2FA."
+            echo "After approval, dispatch the signed tag-bound verification exactly:"
+            echo '```sh'
+            echo "gh workflow run release.yml --ref v${VERSION} -f version=${VERSION}"
+            echo '```'
+            echo "No workflow secret or long-lived publish token is used."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-public-registry:
+    name: Verify approved public registry release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Use the release npm client
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.18.0
+          test "$(npm --version)" = "11.18.0"
+
+      - name: Install the locked release dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify requested version and exact release tag
+        id: release
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Version must be an exact semver value without a leading v." >&2
             exit 1
           }
-          printf 'path=%s\n' "${archives[0]}" >> "$GITHUB_OUTPUT"
+          expected_ref="refs/tags/v${REQUESTED_VERSION}"
+          test "$GITHUB_REF" = "$expected_ref" || {
+            echo "Registry verification must run from ${expected_ref}, not ${GITHUB_REF}." >&2
+            echo "Use: gh workflow run release.yml --ref v${REQUESTED_VERSION} -f version=${REQUESTED_VERSION}" >&2
+            exit 1
+          }
+          canonical_version="$(node -p "require('./npm/scripts/version.js').readCanonicalVersion(process.cwd())")"
+          test "$canonical_version" = "$REQUESTED_VERSION" || {
+            echo "Requested ${REQUESTED_VERSION}, but the tag contains ${canonical_version}." >&2
+            exit 1
+          }
+          ANCHORLOOP_RELEASE_TAG="v${REQUESTED_VERSION}" npm run version:check
+          printf 'version=%s\n' "$canonical_version" >> "$GITHUB_OUTPUT"
+          printf 'package_name=%s\n' "$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
 
-      - name: Publish with npm provenance through trusted publishing
-        run: npm publish "${{ steps.archive.outputs.path }}" --access public --provenance
-
-      - name: Smoke-test the public registry release
+      - name: Revalidate GitHub-verified signed annotated tag
+        shell: bash
         env:
-          ANCHORLOOP_RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          object_type="$(jq -r '.object.type' <<< "$ref_json")"
+          object_sha="$(jq -r '.object.sha' <<< "$ref_json")"
+          test "$object_type" = "tag" || {
+            echo "Release tags must remain annotated and signed; ${RELEASE_TAG} is ${object_type}." >&2
+            exit 1
+          }
+
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+          verified="$(jq -r '.verification.verified' <<< "$tag_json")"
+          target_type="$(jq -r '.object.type' <<< "$tag_json")"
+          target_sha="$(jq -r '.object.sha' <<< "$tag_json")"
+          test "$verified" = "true" || {
+            echo "GitHub no longer verifies the signature on ${RELEASE_TAG}." >&2
+            exit 1
+          }
+          test "$target_type" = "commit" || {
+            echo "${RELEASE_TAG} must point directly to a commit." >&2
+            exit 1
+          }
+          test "$target_sha" = "$(git rev-parse HEAD)" || {
+            echo "${RELEASE_TAG} does not point to the checked-out commit." >&2
+            exit 1
+          }
+
+      - name: Require tagged commit to remain in main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" refs/remotes/origin/main || {
+            echo "Release tag is no longer contained in origin/main." >&2
+            exit 1
+          }
+
+      - name: Require exact version to be the approved next candidate
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          candidate_version="$(npm view "${PACKAGE_NAME}@next" version)"
+          test "$candidate_version" = "$VERSION" || {
+            echo "npm next resolves to ${candidate_version}, expected ${VERSION}." >&2
+            exit 1
+          }
+
+      - name: Smoke-test the exact public registry release
+        env:
+          ANCHORLOOP_RELEASE_TAG: v${{ inputs.version }}
         run: >-
           node npm/scripts/registry-smoke.js
           --package "${{ steps.release.outputs.package_name }}"
@@ -157,12 +363,34 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-
           published_head="$(npm view "${PACKAGE_NAME}@${VERSION}" gitHead)"
           expected_head="$(git rev-parse HEAD)"
-
           test "$published_head" = "$expected_head" || {
             echo "Published gitHead ${published_head} does not match ${expected_head}." >&2
             exit 1
           }
 
+      - name: Record the human-owned promotion command
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Public registry verification passed"
+            echo
+            echo "Promotion remains an interactive maintainer action with 2FA:"
+            echo '```sh'
+            echo "npm dist-tag add ${PACKAGE_NAME}@${VERSION} latest"
+            echo "npm view ${PACKAGE_NAME}@latest version"
+            echo '```'
+            echo
+            echo "After npm confirms ${PACKAGE_NAME}@latest is ${VERSION}, open a"
+            echo "post-promotion documentation PR against main. Update every source"
+            echo "status surface and its release-document tests from 0.1.0 production /"
+            echo "${VERSION} candidate to ${VERSION} production. Update or retire the"
+            echo "${VERSION}-specific finalizer source fragments and source-RC assertions"
+            echo "before preparing the next release cycle, and leave the signed"
+            echo "v${VERSION} artifact unchanged."
+          } >> "$GITHUB_STEP_SUMMARY"

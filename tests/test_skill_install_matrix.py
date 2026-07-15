@@ -56,7 +56,7 @@ class SkillInstallMatrixTests(unittest.TestCase):
             home = base / "home"
             project.mkdir()
             expected_root = project if project_scoped else home
-            expected = expected_root.joinpath(*location, "skills", "anchorloop")
+            expected = expected_root.resolve().joinpath(*location, "skills", "anchorloop")
 
             with mock.patch("anchorloop.skill_install.Path.home", return_value=home):
                 installer = SkillInstaller(project)

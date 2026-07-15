@@ -18,6 +18,7 @@ from .quality import (
     GitInspectionError,
     git_changed_path_names,
     run_precommit,
+    task_change_baseline,
     workspace_fingerprint,
 )
 from .project_lock import ProjectLock
@@ -42,6 +43,7 @@ BRIEF_FIELDS = ("outcome", "scope", "constraints", "invariant", "uncertainty")
 VERIFICATION_RESULTS = {"pass", "fail", "partial", "not-applicable"}
 CAREFUL_RECALL_DELAY_HOURS = 24
 TASK_SCHEMA_VERSION = 2
+POST_CLOSE_INTEGRITY_FORMAT_VERSION = 1
 
 # These are deliberately conservative signals.  They promote a task only when
 # an engineer explicitly names a sensitive area or provides a recognisably
@@ -862,6 +864,7 @@ class AnchorProject:
         if "plan" not in task:
             raise AnchorError("A recorded plan is required before approval.")
         self._normalize_task_schema_for_approval(task)
+        self._ensure_task_change_baseline(task)
         snapshot = self._active_rules_snapshot()
         task["ruleset"] = snapshot
         approval_subject = self._task_approval_subject(task)
@@ -888,9 +891,10 @@ class AnchorProject:
         if "plan" not in task:
             raise AnchorError("A recorded plan is required before approval.")
         self._normalize_task_schema_for_approval(task)
+        self._ensure_task_change_baseline(task)
         task["ruleset"] = self._active_rules_snapshot()
         subject = self._task_approval_subject(task)
-        return {
+        preview = {
             "task_id": task["id"],
             "title": task["title"],
             "mode": task.get("mode", "FAST"),
@@ -898,6 +902,11 @@ class AnchorProject:
             "subject_digest": self._document_digest(subject),
             "ruleset_version": task["ruleset"]["version"],
         }
+        if "actual_diff_revision_evidence" in subject:
+            preview["actual_diff_revision_evidence"] = subject[
+                "actual_diff_revision_evidence"
+            ]
+        return preview
 
     @mutating("task.verify")
     def verify_task(
@@ -1044,7 +1053,7 @@ class AnchorProject:
         now = datetime.now(UTC)
         if now < due_at:
             raise AnchorError(f"Delayed recall is not due until {due_at.isoformat()}.")
-        comprehension["delayed_recall"] = {
+        recall_record = {
             "statement": self._required_text(response, "Delayed recall response"),
             "score": score,
             "by": self._required_text(by, "Engineer name"),
@@ -1052,6 +1061,12 @@ class AnchorProject:
             "recorded_at": now.isoformat(),
             "delay_seconds": max(0.0, (now - due_at).total_seconds()),
         }
+        self._seal_post_close_record(
+            task,
+            recall_record,
+            record_type="delayed_recall",
+        )
+        comprehension["delayed_recall"] = recall_record
         task.setdefault("metrics", {})["delayed_recall_score"] = score
         self._append_task_event(task, "task.delayed-recall.recorded")
         self._write_json(path, task)
@@ -1092,6 +1107,11 @@ class AnchorProject:
             "notes": self._required_text(notes, "Post-completion notes"),
             "provenance": "reported-post-completion",
         }
+        self._seal_post_close_record(
+            task,
+            record,
+            record_type="post_completion_outcome",
+        )
         task.setdefault("post_completion_outcomes", []).append(record)
         task.setdefault("metrics", {})["latest_post_completion_outcome"] = {
             key: record[key]
@@ -1123,6 +1143,21 @@ class AnchorProject:
             if not isinstance(outcomes, list):
                 outcomes = []
             latest_outcome = outcomes[-1] if outcomes and isinstance(outcomes[-1], dict) else {}
+            delayed_integrity = self._post_close_record_integrity(task, delayed)
+            outcome_integrities = [
+                self._post_close_record_integrity(task, record)
+                for record in outcomes
+                if isinstance(record, dict)
+            ]
+            latest_outcome_integrity = (
+                outcome_integrities[-1] if outcome_integrities else None
+            )
+            legacy_unverified_observations = int(
+                delayed_integrity == "legacy-unverified"
+            ) + sum(
+                integrity == "legacy-unverified"
+                for integrity in outcome_integrities
+            )
             input_tokens = metrics.get("input_tokens")
             output_tokens = metrics.get("output_tokens")
             total_tokens = (
@@ -1146,7 +1181,10 @@ class AnchorProject:
                     "agent_provider": metrics.get("agent_provider"),
                     "agent_model": metrics.get("agent_model"),
                     "delayed_recall_score": delayed.get("score"),
+                    "delayed_recall_integrity": delayed_integrity,
                     "outcome_observations": len(outcomes),
+                    "latest_outcome_integrity": latest_outcome_integrity,
+                    "legacy_unverified_observations": legacy_unverified_observations,
                     "defects_found": latest_outcome.get("defects_found"),
                     "rollback": latest_outcome.get("rollback"),
                     "corrective_refactor": latest_outcome.get("corrective_refactor"),
@@ -1172,6 +1210,9 @@ class AnchorProject:
                 "tasks_with_delayed_recall": len(recall_scores),
                 "tasks_with_outcome_observation": sum(
                     int(row["outcome_observations"] > 0) for row in rows
+                ),
+                "legacy_unverified_observations": sum(
+                    row["legacy_unverified_observations"] for row in rows
                 ),
                 "average_delayed_recall_score": (
                     sum(recall_scores) / len(recall_scores) if recall_scores else None
@@ -1200,10 +1241,18 @@ class AnchorProject:
             "quality": task.get("quality", []),
         }
         if target == "plan":
+            if normalized_reason == _ACTUAL_DIFF_REVISION_REASON:
+                revision["actual_diff_risk_paths"] = self._actual_diff_risk_paths(task)
             revision["approval"] = task.get("approval")
             revision["ruleset"] = task.get("ruleset")
+            revision["change_baseline"] = task.get("change_baseline")
             task.setdefault("revisions", []).append(revision)
-            for field in ("approval", "ruleset", "quality", "verification"):
+            for field in (
+                "approval",
+                "ruleset",
+                "quality",
+                "verification",
+            ):
                 task.pop(field, None)
             task["state"] = "planned"
             self._append_task_event(task, "task.revise.plan")
@@ -1265,7 +1314,15 @@ class AnchorProject:
                 closed_at = self._closed_at(task)
                 delay = self._recall_delay_hours(comprehension)
                 comprehension["recall_due_at"] = (closed_at + timedelta(hours=delay)).isoformat()
-        if action == "close":
+        if action == "close" and task.get("schema_version") == TASK_SCHEMA_VERSION:
+            task["post_close_integrity"] = {
+                "format_version": POST_CLOSE_INTEGRITY_FORMAT_VERSION,
+                "head_sequence": 0,
+                "head_digest": None,
+            }
+            task["close_digest"] = self._closed_task_digest(task)
+            task["post_close_integrity"]["head_digest"] = task["close_digest"]
+        elif action == "close":
             task["close_digest"] = self._closed_task_digest(task)
         self._append_task_event(task, f"task.{action}")
         if action == "close":
@@ -1310,7 +1367,16 @@ class AnchorProject:
         self._ensure_approval_matches_task(task)
         self._ensure_actual_diff_mode(task)
         ruleset = task.get("ruleset") or {"rules": {}}
-        quality = run_precommit(self.root, active_categories=set(ruleset["rules"]))
+        try:
+            quality = run_precommit(
+                self.root,
+                active_categories=set(ruleset["rules"]),
+                baseline=task.get("change_baseline"),
+            )
+        except GitInspectionError as error:
+            raise AnchorError(
+                f"Cannot inspect pre-commit source snapshots safely: {error}"
+            ) from error
         task.setdefault("quality", []).append(quality)
         self._write_json(self.active_task_path, task)
         if quality["status"] == "blocked":
@@ -1868,9 +1934,9 @@ class AnchorProject:
     def _ensure_actual_diff_mode(self, task: dict[str, Any]) -> None:
         """Block a low-ownership task when its material diff is CAREFUL."""
 
+        risk_paths = self._actual_diff_risk_paths(task)
         if task.get("mode") == "CAREFUL":
             return
-        risk_paths = self._actual_diff_risk_paths()
         if not risk_paths:
             return
 
@@ -1887,7 +1953,7 @@ class AnchorProject:
         )
         if (
             self._actual_diff_override_covers(override, risk_paths)
-            and self._has_actual_diff_revision(task)
+            and self._has_actual_diff_revision(task, risk_paths)
         ):
             return
 
@@ -1904,14 +1970,24 @@ class AnchorProject:
             "every detected path."
         )
 
-    def _actual_diff_risk_paths(self) -> list[str]:
+    def _actual_diff_risk_paths(self, task: dict[str, Any]) -> list[str]:
         risky: list[str] = []
+        baseline = task.get("change_baseline")
+        if not isinstance(baseline, dict):
+            raise AnchorError(
+                "Cannot evaluate the actual diff safely; the approved task has no "
+                "change baseline. Revise and approve the plan again."
+            )
         try:
-            changed_paths = git_changed_path_names(self.root, strict=True)
+            changed_paths = git_changed_path_names(
+                self.root,
+                baseline=baseline,
+                strict=True,
+            )
         except GitInspectionError as error:
             raise AnchorError(
-                "Cannot evaluate the actual Git diff safely; review and precommit are blocked. "
-                "Restore Git access and retry."
+                "Cannot evaluate the actual diff safely; review and precommit are blocked. "
+                f"{error} Restore the approved baseline and retry."
             ) from error
         for path in changed_paths:
             path_text = "/" + path.casefold().strip("/")
@@ -1923,19 +1999,126 @@ class AnchorProject:
                 risky.append(path)
         return risky
 
-    @staticmethod
-    def _has_actual_diff_revision(task: dict[str, Any]) -> bool:
-        revisions = task.get("revisions")
-        if not isinstance(revisions, list):
+    def _ensure_task_change_baseline(self, task: dict[str, Any]) -> None:
+        """Capture one immutable task baseline before its first approval."""
+
+        existing = task.get("change_baseline")
+        if isinstance(existing, dict):
+            self._materialize_missing_submodule_baselines(existing)
+            return
+        try:
+            task["change_baseline"] = task_change_baseline(self.root)
+        except GitInspectionError as error:
+            raise AnchorError(
+                "Cannot capture the task change baseline safely; approval is blocked. "
+                f"{error}"
+            ) from error
+
+    def _materialize_missing_submodule_baselines(
+        self,
+        baseline: dict[str, Any],
+    ) -> None:
+        """Fill only newly materialized submodules without moving task origin.
+
+        Plan revision must not advance the outer baseline to current HEAD or a
+        committed sensitive diff could disappear.  An approved uninitialized
+        submodule is the narrow exception: once materialized at its tracked
+        gitlink, capture its nested baseline while preserving the original
+        outer commit.
+        """
+
+        if baseline.get("source") != "git":
+            return
+        submodules = baseline.get("submodules")
+        missing = (
+            [name for name, nested in submodules.items() if nested is None]
+            if isinstance(submodules, dict)
+            else []
+        )
+        if not missing:
+            return
+        try:
+            current = task_change_baseline(self.root)
+        except GitInspectionError as error:
+            raise AnchorError(
+                "Cannot inspect newly materialized Git submodules safely; approval is blocked. "
+                f"{error}"
+            ) from error
+        if current.get("source") != "git":
+            raise AnchorError("The preserved Git task baseline no longer belongs to a Git project.")
+        expected_oids = baseline.get("submodule_oids")
+        current_oids = current.get("submodule_oids")
+        current_submodules = current.get("submodules")
+        if (
+            not isinstance(expected_oids, dict)
+            or not isinstance(current_oids, dict)
+            or not isinstance(current_submodules, dict)
+            or set(expected_oids) != set(current_oids)
+        ):
+            raise AnchorError(
+                "The Git submodule set changed after the task baseline was captured."
+            )
+        for name in missing:
+            nested = current_submodules.get(name)
+            if nested is None:
+                continue
+            if (
+                not isinstance(nested, dict)
+                or nested.get("source") != "git"
+                or nested.get("head") != current_oids.get(name)
+                or current_oids.get(name) != expected_oids.get(name)
+            ):
+                raise AnchorError(
+                    f"Materialized Git submodule does not match its approved gitlink: {name}"
+                )
+            submodules[name] = nested
+
+    @classmethod
+    def _has_actual_diff_revision(
+        cls,
+        task: dict[str, Any],
+        risk_paths: list[str],
+    ) -> bool:
+        required = set(risk_paths)
+        if not required:
             return False
         return any(
-            isinstance(revision, dict)
-            and revision.get("target") == "plan"
-            and revision.get("reason") == _ACTUAL_DIFF_REVISION_REASON
-            and revision.get("previous_state")
-            in {"implementing", "review_ready", "quality_checked"}
-            for revision in revisions
+            required.issubset(set(evidence["risk_paths"]))
+            for evidence in cls._actual_diff_revision_evidence(task)
         )
+
+    @staticmethod
+    def _actual_diff_revision_evidence(
+        task: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        revisions = task.get("revisions")
+        if not isinstance(revisions, list):
+            return []
+        evidence: list[dict[str, Any]] = []
+        for revision in revisions:
+            if (
+                not isinstance(revision, dict)
+                or revision.get("target") != "plan"
+                or revision.get("reason") != _ACTUAL_DIFF_REVISION_REASON
+                or revision.get("previous_state")
+                not in {"implementing", "review_ready", "quality_checked"}
+            ):
+                continue
+            paths = revision.get("actual_diff_risk_paths")
+            if (
+                not isinstance(paths, list)
+                or not paths
+                or not all(isinstance(path, str) and path for path in paths)
+            ):
+                continue
+            evidence.append(
+                {
+                    "at": revision.get("at"),
+                    "previous_state": revision.get("previous_state"),
+                    "risk_paths": sorted(set(paths)),
+                }
+            )
+        return evidence
 
     @staticmethod
     def _actual_diff_override_covers(
@@ -2372,6 +2555,11 @@ class AnchorProject:
         ):
             raise AnchorError("Only CAREFUL tasks may carry a delayed-recall policy or record.")
 
+        change_baseline = task.get("change_baseline")
+        if change_baseline is not None:
+            cls._validate_task_change_baseline(change_baseline)
+
+        protected_post_close = task.get("post_close_integrity") is not None
         delayed_recall = comprehension.get("delayed_recall")
         if delayed_recall is not None:
             if not isinstance(delayed_recall, dict):
@@ -2389,6 +2577,68 @@ class AnchorProject:
                 or delay_seconds < 0
             ):
                 raise AnchorError("Delayed recall delay must be a finite non-negative number.")
+            recall_digest = delayed_recall.get("record_digest")
+            if recall_digest is None:
+                if protected_post_close:
+                    raise AnchorError(
+                        "Protected delayed recall records require a record digest."
+                    )
+            else:
+                cls._required_text(recall_digest, "Delayed recall record digest")
+                if recall_digest != cls._record_digest(delayed_recall):
+                    raise AnchorError(
+                        "delayed recall record digest does not match its contents."
+                    )
+
+        outcomes = task.get("post_completion_outcomes")
+        if outcomes is not None:
+            if state != "closed":
+                raise AnchorError("Only closed tasks may carry post-completion outcomes.")
+            if not isinstance(outcomes, list):
+                raise AnchorError("Post-completion outcomes must be a list.")
+            for record in outcomes:
+                if not isinstance(record, dict):
+                    raise AnchorError("Post-completion outcome record must be an object.")
+                for field in ("at", "by", "notes", "provenance"):
+                    cls._required_text(
+                        record.get(field),
+                        f"Post-completion outcome {field}",
+                    )
+                defects_found = record.get("defects_found")
+                if (
+                    not isinstance(defects_found, int)
+                    or isinstance(defects_found, bool)
+                    or defects_found < 0
+                ):
+                    raise AnchorError(
+                        "Post-completion outcome defects must be a non-negative integer."
+                    )
+                if not isinstance(record.get("rollback"), bool) or not isinstance(
+                    record.get("corrective_refactor"), bool
+                ):
+                    raise AnchorError(
+                        "Post-completion outcome rollback and corrective-refactor values must be boolean."
+                    )
+                if record.get("provenance") != "reported-post-completion":
+                    raise AnchorError("Post-completion outcome provenance is invalid.")
+                outcome_digest = record.get("record_digest")
+                if outcome_digest is None:
+                    if protected_post_close:
+                        raise AnchorError(
+                            "Protected post-completion outcome records require a record digest."
+                        )
+                else:
+                    cls._required_text(
+                        outcome_digest,
+                        "Post-completion outcome record digest",
+                    )
+                    if outcome_digest != cls._record_digest(record):
+                        raise AnchorError(
+                            "post-completion outcome record digest does not match its contents."
+                        )
+
+        if protected_post_close and state != "closed":
+            raise AnchorError("Only closed tasks may carry post-close integrity evidence.")
 
         approved_states = {
             "approved",
@@ -2568,6 +2818,7 @@ class AnchorProject:
                 cls._required_text(close_digest, "Anchor task close digest")
                 if close_digest != cls._closed_task_digest(task):
                     raise AnchorError("Anchor task close digest does not match immutable close evidence.")
+            cls._validate_post_close_integrity(task)
 
     @staticmethod
     def _created_at(task: dict[str, Any]) -> datetime:
@@ -2768,10 +3019,226 @@ class AnchorProject:
             {key: value for key, value in record.items() if key != "record_digest"}
         )
 
+    @classmethod
+    def _seal_post_close_record(
+        cls,
+        task: dict[str, Any],
+        record: dict[str, Any],
+        *,
+        record_type: str,
+    ) -> None:
+        integrity = task.get("post_close_integrity")
+        if not isinstance(integrity, dict):
+            record["record_digest"] = cls._record_digest(record)
+            return
+        head_sequence = integrity.get("head_sequence")
+        head_digest = integrity.get("head_digest")
+        if (
+            not isinstance(head_sequence, int)
+            or isinstance(head_sequence, bool)
+            or head_sequence < 0
+            or not isinstance(head_digest, str)
+        ):
+            raise AnchorError("Post-close integrity head is invalid.")
+        record.update(
+            {
+                "record_type": record_type,
+                "task_id": task.get("id"),
+                "sequence": head_sequence + 1,
+                "previous_digest": head_digest,
+            }
+        )
+        record["record_digest"] = cls._record_digest(record)
+        integrity["head_sequence"] = record["sequence"]
+        integrity["head_digest"] = record["record_digest"]
+
+    @classmethod
+    def _validate_post_close_integrity(cls, task: dict[str, Any]) -> None:
+        integrity = task.get("post_close_integrity")
+        if integrity is None:
+            return
+        if not isinstance(integrity, dict):
+            raise AnchorError("Post-close integrity discriminator must be an object.")
+        if integrity.get("format_version") != POST_CLOSE_INTEGRITY_FORMAT_VERSION:
+            raise AnchorError("Post-close integrity format version is invalid.")
+        head_sequence = integrity.get("head_sequence")
+        head_digest = integrity.get("head_digest")
+        if (
+            not isinstance(head_sequence, int)
+            or isinstance(head_sequence, bool)
+            or head_sequence < 0
+        ):
+            raise AnchorError("Post-close integrity head sequence is invalid.")
+        if (
+            not isinstance(head_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", head_digest) is None
+        ):
+            raise AnchorError("Post-close integrity head digest is invalid.")
+        close_digest = task.get("close_digest")
+        if not isinstance(close_digest, str):
+            raise AnchorError("Post-close integrity requires a close digest anchor.")
+
+        records: list[tuple[dict[str, Any], str]] = []
+        comprehension = task.get("comprehension")
+        delayed_recall = (
+            comprehension.get("delayed_recall")
+            if isinstance(comprehension, dict)
+            else None
+        )
+        if isinstance(delayed_recall, dict):
+            records.append((delayed_recall, "delayed_recall"))
+        outcomes = task.get("post_completion_outcomes")
+        outcome_records = outcomes if isinstance(outcomes, list) else []
+        outcome_sequences = [
+            record.get("sequence")
+            for record in outcome_records
+            if isinstance(record, dict)
+        ]
+        try:
+            outcomes_are_ordered = outcome_sequences == sorted(outcome_sequences)
+        except TypeError as error:
+            raise AnchorError("Post-completion outcome record sequence is invalid.") from error
+        if not outcomes_are_ordered:
+            raise AnchorError("Post-completion outcome record order is invalid.")
+        records.extend(
+            (record, "post_completion_outcome")
+            for record in outcome_records
+            if isinstance(record, dict)
+        )
+        try:
+            ordered = sorted(records, key=lambda item: item[0].get("sequence"))
+        except TypeError as error:
+            raise AnchorError("Post-close record sequence is invalid.") from error
+        if len(ordered) != head_sequence:
+            raise AnchorError("Post-close record chain length does not match its head.")
+
+        previous_digest = close_digest
+        seen_digests: set[str] = set()
+        for expected_sequence, (record, expected_type) in enumerate(ordered, start=1):
+            if record.get("record_type") != expected_type:
+                raise AnchorError("Post-close record type does not match its storage location.")
+            if record.get("task_id") != task.get("id"):
+                raise AnchorError("Post-close record belongs to a different task.")
+            if record.get("sequence") != expected_sequence:
+                raise AnchorError("Post-close record sequence is not contiguous.")
+            if record.get("previous_digest") != previous_digest:
+                raise AnchorError("Post-close record previous digest does not match the chain.")
+            record_digest = record.get("record_digest")
+            if (
+                not isinstance(record_digest, str)
+                or record_digest != cls._record_digest(record)
+            ):
+                raise AnchorError("Post-close record digest does not match its contents.")
+            if record_digest in seen_digests:
+                raise AnchorError("Post-close record digest is duplicated.")
+            seen_digests.add(record_digest)
+            previous_digest = record_digest
+        if head_digest != previous_digest:
+            raise AnchorError("Post-close integrity head does not match the record chain.")
+
+    @staticmethod
+    def _post_close_record_integrity(
+        task: dict[str, Any],
+        record: dict[str, Any],
+    ) -> str | None:
+        if not record:
+            return None
+        if not isinstance(task.get("post_close_integrity"), dict):
+            return "legacy-unverified"
+        return (
+            "chain-verified"
+            if record.get("record_digest") is not None
+            else "legacy-unverified"
+        )
+
+    @classmethod
+    def _validate_task_change_baseline(cls, baseline: object) -> None:
+        if not isinstance(baseline, dict):
+            raise AnchorError("Anchor task change baseline must be an object.")
+        if baseline.get("format_version") != 1:
+            raise AnchorError("Anchor task change baseline has an invalid format version.")
+        source = baseline.get("source")
+        if source == "git":
+            head = cls._required_text(
+                baseline.get("head"),
+                "Anchor task Git baseline commit",
+            )
+            if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
+                raise AnchorError("Anchor task Git baseline commit is invalid.")
+            if not isinstance(baseline.get("project_prefix"), str):
+                raise AnchorError("Anchor task Git baseline project path is invalid.")
+            submodules = baseline.get("submodules", {})
+            if not isinstance(submodules, dict):
+                raise AnchorError("Anchor task Git submodule baselines are invalid.")
+            submodule_oids = baseline.get("submodule_oids", {})
+            if (
+                not isinstance(submodule_oids, dict)
+                or set(submodule_oids) != set(submodules)
+                or not all(
+                    isinstance(oid, str)
+                    and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid)
+                    is not None
+                    for oid in submodule_oids.values()
+                )
+            ):
+                raise AnchorError("Anchor task Git submodule OIDs are invalid.")
+            for path, nested in submodules.items():
+                parsed_path = Path(path) if isinstance(path, str) else None
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or parsed_path is None
+                    or parsed_path.is_absolute()
+                    or bool(parsed_path.drive)
+                    or bool(parsed_path.root)
+                    or ".." in parsed_path.parts
+                ):
+                    raise AnchorError("Anchor task Git submodule path is invalid.")
+                if nested is not None:
+                    cls._validate_task_change_baseline(nested)
+                    if nested.get("source") != "git":
+                        raise AnchorError(
+                            "Materialized Git submodules require a Git task baseline."
+                        )
+            return
+        if source == "filesystem":
+            entries = baseline.get("entries")
+            if not isinstance(entries, dict):
+                raise AnchorError("Anchor task filesystem baseline entries are invalid.")
+            git_context = baseline.get("git_context")
+            if git_context is not None and git_context not in {"none", "unborn"}:
+                raise AnchorError("Anchor task filesystem Git context is invalid.")
+            git_unborn = baseline.get("git_unborn")
+            if git_unborn is not None and git_unborn is not True:
+                raise AnchorError("Anchor task unborn Git baseline marker is invalid.")
+            if (git_unborn is True or git_context == "unborn") and not isinstance(
+                baseline.get("project_prefix"),
+                str,
+            ):
+                raise AnchorError("Anchor task unborn Git project path is invalid.")
+            for path, digest in entries.items():
+                parsed_path = Path(path) if isinstance(path, str) else None
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or parsed_path is None
+                    or parsed_path.is_absolute()
+                    or bool(parsed_path.drive)
+                    or bool(parsed_path.root)
+                    or ".." in parsed_path.parts
+                    or not isinstance(digest, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+                ):
+                    raise AnchorError(
+                        "Anchor task filesystem baseline entries are invalid."
+                    )
+            return
+        raise AnchorError("Anchor task change baseline source is invalid.")
+
     @staticmethod
     def _verification_metric_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
-        return {
+        subject = {
             field: metrics.get(field)
             for field in (
                 "agent_turns",
@@ -2783,6 +3250,7 @@ class AnchorProject:
                 "provenance",
             )
         }
+        return subject
 
     @classmethod
     def _closed_task_subject(cls, task: dict[str, Any]) -> dict[str, Any]:
@@ -2796,7 +3264,7 @@ class AnchorProject:
             )
         } if isinstance(comprehension, dict) else None
         metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
-        return {
+        subject = {
             "schema_version": task.get("schema_version"),
             "task_id": task.get("id"),
             "state": task.get("state"),
@@ -2812,6 +3280,10 @@ class AnchorProject:
                 "wall_seconds": metrics.get("wall_seconds"),
             },
         }
+        integrity = task.get("post_close_integrity")
+        if isinstance(integrity, dict):
+            subject["post_close_integrity_format"] = integrity.get("format_version")
+        return subject
 
     @classmethod
     def _closed_task_digest(cls, task: dict[str, Any]) -> str:
@@ -2825,8 +3297,8 @@ class AnchorProject:
         if task.get("schema_version") is None:
             task["schema_version"] = TASK_SCHEMA_VERSION
 
-    @staticmethod
-    def _task_approval_subject(task: dict[str, Any]) -> dict[str, Any]:
+    @classmethod
+    def _task_approval_subject(cls, task: dict[str, Any]) -> dict[str, Any]:
         comprehension = task.get("comprehension")
         # New records bind the immutable delay policy, not a timestamp that is
         # intentionally assigned only when the task closes. Preserve the old
@@ -2856,8 +3328,13 @@ class AnchorProject:
             "comprehension_policy": comprehension_policy,
             "ruleset": task.get("ruleset"),
         }
+        if "change_baseline" in task:
+            subject["change_baseline"] = task.get("change_baseline")
         if "schema_version" in task:
             subject["schema_version"] = task.get("schema_version")
+        actual_diff_evidence = cls._actual_diff_revision_evidence(task)
+        if actual_diff_evidence:
+            subject["actual_diff_revision_evidence"] = actual_diff_evidence
         return subject
 
     def _task_approval_digests(self, subject: dict[str, Any]) -> dict[str, str]:
@@ -2953,9 +3430,15 @@ class AnchorProject:
             "changed_artifacts": changed,
             "approval": approval,
             "ruleset": task.get("ruleset"),
+            "change_baseline": task.get("change_baseline"),
         }
         task.setdefault("approval_invalidations", []).append(invalidation)
-        for field in ("approval", "ruleset", "quality", "verification"):
+        for field in (
+            "approval",
+            "ruleset",
+            "quality",
+            "verification",
+        ):
             task.pop(field, None)
         if state == "briefing":
             invalidation["plan"] = task.pop("plan", None)
@@ -3016,8 +3499,24 @@ class AnchorProject:
                 "The task returned to review_ready; rerun: "
                 f"{display_command('precommit')}"
             )
-        current = workspace_fingerprint(self.root)
-        if current.get("digest") == recorded.get("digest"):
+        try:
+            current = workspace_fingerprint(self.root)
+        except GitInspectionError as error:
+            self._invalidate_quality(
+                task,
+                recorded_fingerprint=recorded,
+                current_fingerprint=None,
+                reason=f"The workspace can no longer be fingerprinted safely: {error}",
+            )
+            raise StateRecordedError(
+                "The workspace can no longer be fingerprinted safely. "
+                "The task returned to review_ready."
+            ) from error
+        if (
+            current.get("digest") == recorded.get("digest")
+            and current.get("git_state_digest")
+            == recorded.get("git_state_digest")
+        ):
             return
         self._invalidate_quality(
             task,

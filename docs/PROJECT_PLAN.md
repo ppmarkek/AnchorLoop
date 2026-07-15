@@ -79,9 +79,11 @@ required before approval identity can be treated as an access-control claim.
    relaxes the filesystem boundary.
 9. Generated cache and recovery internals are ignored and never committed as
    project evidence.
-10. The actual Git diff is re-evaluated before review and precommit; CAREFUL
-    paths cannot proceed under a lower mode without a reviewed, audited
-    path-specific override.
+10. Changes from the task baseline are re-evaluated before review and
+    precommit: the actual Git diff when a committed `HEAD` exists, or a
+    deterministic materialized-file fallback for unborn and non-Git
+    workspaces. CAREFUL paths cannot proceed under a lower mode without a
+    reviewed, audited path-specific override.
 11. Installer destination compatibility is not presented as verified native
     host discovery without a real-host test.
 
@@ -98,11 +100,11 @@ anchor rules list|propose|approve|supersede
 anchor agent detect|setup|status
 ~~~
 
-After publication, the npm form runs the same surface through the pinned
-`npx --yes anchorloop@0.2.0` command. During release-candidate development use
-the editable checkout and `anchor`; `anchorloop@0.1.0` remains the production
-npm package. README and the bundled skill contain the full structured
-plan/verification examples.
+After publication and registry smoke, the npm form will run the same surface
+through the pinned `npx --yes anchorloop@0.2.0` command. During release-candidate
+development use the editable Python checkout and `anchor`; `anchorloop@0.1.0`
+remains the production npm package. README and the bundled skill contain the
+full structured plan/verification examples.
 
 ## Production release gates
 
@@ -114,18 +116,25 @@ Code is release-ready only when all of these are true:
 - wheel install and local packed-tarball lifecycle pass from a clean temp root;
 - the npm tarball contains every runtime module, skill asset, and README link
   target, with no cache, bytecode, build output, or project dependency;
-- a GitHub-verified signed annotated tag points to the green commit;
-- npm provenance publishing succeeds;
+- a GitHub-verified signed annotated tag points to the green commit contained
+  in `origin/main`;
+- stage-only npm Trusted Publishing places the exact tarball under `next` with
+  provenance and without a long-lived token;
+- a maintainer downloads and inspects the staged artifact, then approves it
+  interactively with 2FA;
 - the exact public registry version passes install, full task lifecycle,
-  uninstall, and residue checks.
+  uninstall, residue, `next` tag, and `gitHead` checks before a maintainer
+  promotes it to `latest` interactively with 2FA.
 
-The unscoped `anchorloop@0.1.0` package is already published. `0.2.0` must be
-released only from a GitHub-verified signed annotated `v0.2.0` tag after the
-full CI matrix passes. The protected `npm-release` environment and npm trusted
-publisher for `.github/workflows/release.yml` must use OIDC without a
-long-lived npm token. The workflow refuses an already-published exact version,
-performs a registry-backed lifecycle smoke, and verifies that npm `gitHead`
-matches the tagged commit. Do not create the tag or publish from a release PR.
+The `0.2.0` release must come from a GitHub-verified signed annotated `v0.2.0`
+tag contained in `origin/main` after the full CI matrix passes. The protected
+`npm-release` environment must use a stage-only Trusted Publisher for
+`.github/workflows/release.yml`; it allows `npm stage publish` through OIDC but
+not direct `npm publish`. The automated workflow refuses an already-published
+exact version and stores no npm token. Human-owned steps remain explicit:
+inspect the staged artifact, approve it with 2FA, dispatch the read-only public
+registry and `gitHead` verification, then promote the verified exact version to
+`latest` interactively with 2FA.
 
 ## Pilot evidence
 

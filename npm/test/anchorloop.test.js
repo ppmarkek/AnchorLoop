@@ -196,12 +196,13 @@ test("the package manifest allowlists the runner and its Python skill assets", (
   const readme = fs.readFileSync(path.join(repositoryRoot, "README.md"), "utf8");
   assert.match(
     readme,
-    /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-delivery-loop\.svg/,
+    /src="docs\/assets\/anchorloop-delivery-loop\.svg"/,
   );
   assert.match(
     readme,
-    /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-evidence-integrity\.svg/,
+    /src="docs\/assets\/anchorloop-evidence-integrity\.svg"/,
   );
+  assert.doesNotMatch(readme, /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\//);
 });
 
 test("the actual npm tarball contains only release runtime and documentation files", { timeout: 60_000 }, () => {

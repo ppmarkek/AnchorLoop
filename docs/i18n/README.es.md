@@ -3,7 +3,7 @@
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
 > - **Producción publicada:** `anchorloop@0.1.0`
-> - **main sin publicar:** candidato de versión `0.2.0`
+> - **Candidato de versión sin publicar:** `0.2.0`
 > - Hasta publicar `0.2.0`, usa `npx --yes anchorloop@0.1.0 ...` en producción.
 >   [Guía de migración](../MIGRATION_0.2.md).
 

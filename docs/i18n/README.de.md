@@ -3,7 +3,7 @@
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
 > - **Veröffentlichte Produktion:** `anchorloop@0.1.0`
-> - **Unveröffentlichtes main:** Release Candidate `0.2.0`
+> - **Unveröffentlichter Release Candidate:** `0.2.0`
 > - Bis zur Veröffentlichung von `0.2.0` Produktionsbefehle mit
 >   `npx --yes anchorloop@0.1.0 ...` ausführen. [Migrationsanleitung](../MIGRATION_0.2.md).
 

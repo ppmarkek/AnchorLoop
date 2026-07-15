@@ -12,7 +12,7 @@ post-release product questions.
 | Skill distribution | Project or user scope across the six documented filesystem destinations; preview/apply and owned-file uninstall. Real-host discovery remains Experimental. |
 | Version source | `src/anchorloop/version.py`; Python metadata reads it and npm/tag values are checked against it. |
 | Mutation model | One interprocess lock plus validated redo journal and ordered event outbox for every project mutation. |
-| Quality fingerprint | Materialized tracked/non-ignored files, recursively including submodules; Git metadata is diagnostic only. |
+| Quality fingerprint | Materialized tracked/non-ignored files plus authoritative HEAD/index/diff state, recursively including submodules. |
 | Human modes | AUTO recommendation with FAST/STANDARD/CAREFUL, explicit downgrade reason, human artifact/comprehension, and CAREFUL delayed recall. |
 | Cache/recovery state | Ignored local runtime data; never committed as workflow evidence. |
 | Trust statement | `--by` and interactive TTY confirmation are auditable provenance, not authenticated identity. |
@@ -21,14 +21,18 @@ post-release product questions.
 
 ### Publish the immutable 0.2.0 version
 
-`anchorloop@0.1.0` is published production. Current `main` is the unreleased
-`0.2.0` release candidate. A maintainer must merge the green release PR, create
-a GitHub-verified signed annotated `v0.2.0` tag, and push only that tag. The
-workflow then verifies the canonical version, refuses an existing exact npm
-version, publishes through OIDC, runs the registry lifecycle, and checks npm
-`gitHead` against the tagged commit. No code path or document may claim that
-the `0.2.0` guided installer is available from npm `latest` before this gate
-succeeds.
+`anchorloop@0.1.0` remains published production. The current release branch is
+the unreleased `0.2.0` release candidate. The release flow requires the signed
+annotated tag commit to be contained in `origin/main` and to pass exact-tag CI
+before the exact tarball is staged under `next` through a Trusted Publisher
+configured for stage-only `npm stage publish`. A maintainer must download and
+inspect the staged artifact, approve it with 2FA, then dispatch the read-only
+exact-version registry lifecycle, verify that `next` points to that version,
+and check npm `gitHead`. Only after those checks pass may a maintainer
+interactively run `npm dist-tag add anchorloop@0.2.0 latest` with 2FA. The
+workflow stores no npm token and never promotes `latest` automatically. Until
+that sequence completes, no document may claim that `0.2.0` is published or
+available from npm `latest`.
 
 ## Decisions before public beta
 

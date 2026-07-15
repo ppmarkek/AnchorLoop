@@ -3,7 +3,7 @@
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
 > - **公開済み production:** `anchorloop@0.1.0`
-> - **未公開の main:** `0.2.0` release candidate
+> - **未公開の release candidate:** `0.2.0`
 > - `0.2.0` が公開されるまでは production で
 >   `npx --yes anchorloop@0.1.0 ...` を使用してください。[移行ガイド](../MIGRATION_0.2.md)。
 

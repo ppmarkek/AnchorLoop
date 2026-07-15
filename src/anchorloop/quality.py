@@ -15,21 +15,29 @@ _PRIVATE_KEY = re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?:api[_-]?key|secret|password|token)\s*[:=]\s*[\"'][^\"']{8,}[\"']"
 )
+_TASK_BASELINE_MAX_ENTRIES = 100_000
+_TASK_BASELINE_MAX_BYTES = 512 * 1024 * 1024
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class GitInspectionError(RuntimeError):
-    """A required Git working-tree query could not be completed."""
+    """A required task-baseline query could not be completed safely."""
 
 
-def run_precommit(root: Path, *, active_categories: set[str]) -> dict[str, Any]:
+def run_precommit(
+    root: Path,
+    *,
+    active_categories: set[str],
+    baseline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Run small, local checks that are safe before project-specific tools exist."""
 
     findings: list[dict[str, str]] = []
     checks: list[dict[str, str]] = []
     starting_fingerprint = workspace_fingerprint(root)
-    files = list(_source_files(root))
+    documents = _source_documents(root, baseline=baseline)
 
-    syntax_failures = _python_syntax_failures(root, files)
+    syntax_failures = _python_syntax_failures(documents)
     if syntax_failures:
         findings.extend(syntax_failures)
         checks.append({"name": "python-syntax", "status": "failed"})
@@ -45,16 +53,55 @@ def run_precommit(root: Path, *, active_categories: set[str]) -> dict[str, Any]:
             }
         )
     else:
-        secret_findings = _secret_findings(root, files)
+        secret_findings = _secret_findings(documents)
         if secret_findings:
             findings.extend(secret_findings)
             checks.append({"name": "secret-baseline", "status": "failed"})
         else:
             checks.append({"name": "secret-baseline", "status": "passed"})
 
-    whitespace_checks = (
-        _git_whitespace_check(root, ("diff", "--check"), "git-diff-check"),
-        _git_whitespace_check(root, ("diff", "--cached", "--check"), "git-cached-diff-check"),
+    whitespace_arguments: list[tuple[tuple[str, ...], str]] = []
+    if isinstance(baseline, dict) and baseline.get("source") == "git":
+        head = baseline.get("head")
+        if not isinstance(head, str):
+            raise GitInspectionError("The approved Git baseline commit is invalid.")
+        whitespace_arguments.append(
+            (("diff", "--check", head, "HEAD", "--"), "git-baseline-diff-check")
+        )
+    elif isinstance(baseline, dict) and baseline.get("source") == "filesystem":
+        git_present, head_exists = _filesystem_git_state(root, baseline)
+        if git_present and head_exists:
+            empty_tree = _git_bytes(
+                root,
+                "hash-object",
+                "-t",
+                "tree",
+                "--stdin",
+                input_data=b"",
+            )
+            if empty_tree is None:
+                raise GitInspectionError("Required unborn Git whitespace baseline failed.")
+            whitespace_arguments.append(
+                (
+                    (
+                        "diff",
+                        "--check",
+                        empty_tree.decode("ascii").strip(),
+                        "HEAD",
+                        "--",
+                    ),
+                    "git-unborn-head-diff-check",
+                )
+            )
+    whitespace_arguments.extend(
+        [
+            (("diff", "--check"), "git-diff-check"),
+            (("diff", "--cached", "--check"), "git-cached-diff-check"),
+        ]
+    )
+    whitespace_checks = tuple(
+        _git_whitespace_check(root, arguments, name)
+        for arguments, name in whitespace_arguments
     )
     checks.extend(whitespace_checks)
     for check in whitespace_checks:
@@ -68,7 +115,11 @@ def run_precommit(root: Path, *, active_categories: set[str]) -> dict[str, Any]:
             )
 
     ending_fingerprint = workspace_fingerprint(root)
-    if starting_fingerprint["digest"] != ending_fingerprint["digest"]:
+    if (
+        starting_fingerprint["digest"] != ending_fingerprint["digest"]
+        or starting_fingerprint.get("git_state_digest")
+        != ending_fingerprint.get("git_state_digest")
+    ):
         findings.append(
             {
                 "category": "workspace",
@@ -95,11 +146,10 @@ def run_precommit(root: Path, *, active_categories: set[str]) -> dict[str, Any]:
 def workspace_fingerprint(root: Path) -> dict[str, Any]:
     """Return a deterministic snapshot of the checked workspace state.
 
-    Verification is bound to the materialized files, not Git metadata. In a
-    Git repository tracked and untracked (non-ignored) paths are enumerated by
-    Git, then read from the working tree. HEAD/index/diff state is recorded in
-    a separate diagnostic digest so a metadata-only commit does not invalidate
-    otherwise identical quality evidence.
+    Verification is bound to both materialized files and the authoritative Git
+    snapshot inspected by the gate. Tracked and untracked (non-ignored) paths
+    are enumerated by Git, then read from the working tree; HEAD/index/diff
+    state is recorded separately so post-gate Git transitions are detectable.
     """
 
     return _workspace_fingerprint(root.resolve(), ancestors=frozenset())
@@ -168,12 +218,16 @@ def _materialized_fingerprint(
             # An uninitialized or unsafe submodule has no materialized tree to
             # read, so bind the evidence to the tracked gitlink instead.
             _update_digest_value(digest, b"index-oid", submodule["index_oid"])
+    aggregate_git_state = _aggregate_git_state_digest(
+        git_state_digest,
+        submodules,
+    )
     return {
         "algorithm": "sha256",
         "format_version": 3,
         "digest": f"sha256:{digest.hexdigest()}",
         "content_digest": f"sha256:{digest.hexdigest()}",
-        "git_state_digest": git_state_digest,
+        "git_state_digest": aggregate_git_state,
         "source": source,
         "files": len(files)
         + sum(max(1, int(submodule.get("files", 0))) for submodule in submodules),
@@ -186,7 +240,7 @@ def _git_materialized_paths(
     *,
     ancestors: frozenset[str],
 ) -> tuple[list[Path], list[dict[str, Any]]] | None:
-    if not (root / ".git").exists():
+    if _validated_git_context(root, strict=False) is None:
         return None
 
     listed = _git_bytes(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--")
@@ -223,44 +277,53 @@ def _git_materialized_paths(
     for name in sorted(submodule_names):
         encoded_name = name.encode("utf-8", errors="surrogateescape")
         index_oid = submodule_names[name]
-        submodule_path = root / name
-        head_result = _git_bytes(root, "-C", name, "rev-parse", "--verify", "HEAD")
-        status_result = _git_bytes(root, "-C", name, "status", "--porcelain=v1", "-z")
-        head = head_result if head_result is not None else b"<missing>"
-        status = status_result if status_result is not None else b"<unavailable>"
         record: dict[str, Any] = {
             "path": encoded_name,
             "index_oid": index_oid,
-            "head": head.strip(),
-            "status": status,
+            "head": b"<missing>",
+            "status": b"<unavailable>",
             "files": 0,
             "content_digest": None,
+            "git_state_digest": None,
         }
-        try:
-            resolved_submodule = submodule_path.resolve(strict=True)
-            resolved_submodule.relative_to(root)
-            submodule_identity = os.path.normcase(str(resolved_submodule))
-            if not resolved_submodule.is_dir():
-                record["state"] = b"uninitialized"
-            elif submodule_identity in ancestors:
-                record["state"] = b"cycle"
-            else:
-                nested = _workspace_fingerprint(resolved_submodule, ancestors=ancestors)
-                record["state"] = (
-                    b"materialized-git"
-                    if (resolved_submodule / ".git").exists()
-                    else b"materialized-filesystem"
-                )
-                record["content_digest"] = nested["content_digest"].encode("ascii")
-                record["files"] = nested["files"]
-        except (OSError, ValueError):
-            record["state"] = b"uninitialized-or-unsafe"
+        resolved_submodule = _materialized_submodule_root(root, name)
+        if resolved_submodule is None:
+            record["state"] = b"uninitialized"
+            submodules.append(record)
+            continue
+        head_result = _git_bytes(
+            resolved_submodule,
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        )
+        status_result = _git_bytes(
+            resolved_submodule,
+            "status",
+            "--porcelain=v1",
+            "-z",
+        )
+        record["head"] = (
+            head_result.strip() if head_result is not None else b"<missing>"
+        )
+        record["status"] = (
+            status_result if status_result is not None else b"<unavailable>"
+        )
+        submodule_identity = os.path.normcase(str(resolved_submodule))
+        if submodule_identity in ancestors:
+            record["state"] = b"cycle"
+        else:
+            nested = _workspace_fingerprint(resolved_submodule, ancestors=ancestors)
+            record["state"] = b"materialized-git"
+            record["content_digest"] = nested["content_digest"].encode("ascii")
+            record["git_state_digest"] = nested.get("git_state_digest")
+            record["files"] = nested["files"]
         submodules.append(record)
     return sorted(paths, key=lambda path: path.relative_to(root).as_posix()), submodules
 
 
 def _git_state_diagnostics(root: Path) -> tuple[str | None, str | None]:
-    """Return non-gating Git diagnostics for audit and troubleshooting."""
+    """Return Git snapshot evidence used by quality integrity checks."""
 
     head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
     staged = _git_bytes(
@@ -294,19 +357,144 @@ def _git_state_diagnostics(root: Path) -> tuple[str | None, str | None]:
     )
 
 
-def _git_bytes(root: Path, *arguments: str) -> bytes | None:
+def _git_environment() -> dict[str, str]:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.upper().startswith("GIT_")
+    }
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return environment
+
+
+def _aggregate_git_state_digest(
+    root_git_state_digest: str | None,
+    submodules: list[dict[str, Any]],
+) -> str | None:
+    if root_git_state_digest is None and not submodules:
+        return None
+    digest = hashlib.sha256()
+    digest.update(b"anchorloop-git-state-tree-v1\0")
+    _update_digest_value(
+        digest,
+        b"root",
+        (root_git_state_digest or "<unavailable>").encode("ascii"),
+    )
+    for submodule in submodules:
+        _update_digest_value(digest, b"submodule-path", submodule["path"])
+        _update_digest_value(digest, b"submodule-index", submodule["index_oid"])
+        _update_digest_value(digest, b"submodule-head", submodule["head"])
+        _update_digest_value(digest, b"submodule-status", submodule["status"])
+        nested = submodule.get("git_state_digest")
+        _update_digest_value(
+            digest,
+            b"submodule-nested-state",
+            (nested or "<unavailable>").encode("ascii"),
+        )
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _run_git(
+    root: Path,
+    *arguments: str,
+    input_data: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes] | None:
     try:
-        process = subprocess.run(
-            ["git", *arguments],
+        return subprocess.run(
+            ["git", "--no-replace-objects", *arguments],
             cwd=root,
             capture_output=True,
             check=False,
+            env=_git_environment(),
+            input=input_data,
         )
     except OSError:
+        return None
+
+
+def _git_bytes(
+    root: Path,
+    *arguments: str,
+    input_data: bytes | None = None,
+) -> bytes | None:
+    process = _run_git(root, *arguments, input_data=input_data)
+    if process is None:
         return None
     if process.returncode != 0:
         return None
     return process.stdout
+
+
+def _validated_git_context(
+    root: Path,
+    *,
+    strict: bool,
+) -> tuple[Path, str] | None:
+    top_level = _git_bytes(root, "rev-parse", "--show-toplevel")
+    if top_level is None:
+        if strict:
+            raise GitInspectionError(
+                "Required Git inspection failed: git rev-parse --show-toplevel"
+            )
+        return None
+    prefix = _git_bytes(root, "rev-parse", "--show-prefix")
+    if prefix is None:
+        raise GitInspectionError(
+            "Required Git inspection failed: git rev-parse --show-prefix"
+        )
+    try:
+        resolved_root = root.resolve(strict=True)
+        discovered = Path(
+            top_level.decode("utf-8", errors="surrogateescape").strip()
+        ).resolve(strict=True)
+        relative = resolved_root.relative_to(discovered)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise GitInspectionError(
+            "Git reported a repository outside the inspected project context."
+        ) from error
+    expected_prefix = "" if relative == Path(".") else relative.as_posix().strip("/")
+    reported_prefix = prefix.decode(
+        "utf-8",
+        errors="surrogateescape",
+    ).replace("\\", "/").strip().strip("/")
+    if reported_prefix != expected_prefix:
+        raise GitInspectionError(
+            "Git reported a working-directory prefix that does not match the inspected project."
+        )
+    _reject_legacy_git_grafts(root)
+    return discovered, reported_prefix
+
+
+def _reject_legacy_git_grafts(root: Path) -> None:
+    graft_path = _git_bytes(root, "rev-parse", "--git-path", "info/grafts")
+    if graft_path is None:
+        raise GitInspectionError("Required Git graft inspection failed.")
+    decoded = graft_path.decode("utf-8", errors="surrogateescape").strip()
+    if not decoded:
+        raise GitInspectionError("Git reported an invalid legacy graft path.")
+    candidate = Path(decoded)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        metadata = os.lstat(candidate)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise GitInspectionError("Legacy Git graft state cannot be inspected safely.") from error
+    if (
+        _is_windows_reparse_point(metadata)
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise GitInspectionError("Legacy Git graft state is unsafe.")
+    try:
+        contents = candidate.read_bytes()
+    except OSError as error:
+        raise GitInspectionError("Legacy Git graft state cannot be read safely.") from error
+    if contents.strip():
+        raise GitInspectionError(
+            "Legacy Git grafts can rewrite commit ancestry and are not supported."
+        )
 
 
 def _update_digest_value(digest: Any, label: bytes, value: bytes) -> None:
@@ -326,6 +514,10 @@ def _update_digest_with_file(digest: Any, root: Path, path: Path) -> None:
         _update_digest_value(digest, b"entry", b"unreadable")
         _update_digest_value(digest, b"path", relative_path)
         return
+    if _is_windows_reparse_point(metadata):
+        raise GitInspectionError(
+            f"Workspace fingerprint refuses Windows reparse point: {path}"
+        )
 
     mode = str(stat.S_IMODE(metadata.st_mode)).encode("ascii")
     if stat.S_ISLNK(metadata.st_mode):
@@ -375,12 +567,36 @@ def _update_digest_with_file(digest: Any, root: Path, path: Path) -> None:
 
 
 def _fingerprint_files(root: Path) -> list[Path]:
-    return [
-        path
-        for path in root.rglob("*")
-        if _is_fingerprintable_path(path)
-        and not any(part in _SKIP_DIRECTORIES for part in path.relative_to(root).parts)
-    ]
+    files: list[Path] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = os.scandir(directory)
+        except OSError as error:
+            raise GitInspectionError(
+                f"Workspace fingerprint cannot inspect directory safely: {directory}"
+            ) from error
+        with entries:
+            for entry in entries:
+                if entry.name in _SKIP_DIRECTORIES:
+                    continue
+                path = Path(entry.path)
+                try:
+                    metadata = os.lstat(path)
+                except OSError as error:
+                    raise GitInspectionError(
+                        f"Workspace fingerprint cannot inspect path safely: {path}"
+                    ) from error
+                if _is_windows_reparse_point(metadata):
+                    raise GitInspectionError(
+                        f"Workspace fingerprint refuses Windows reparse point: {path}"
+                    )
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append(path)
+                elif stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                    files.append(path)
+    return files
 
 
 def _is_fingerprintable_path(path: Path) -> bool:
@@ -388,6 +604,10 @@ def _is_fingerprintable_path(path: Path) -> bool:
         metadata = os.lstat(path)
     except OSError:
         return False
+    if _is_windows_reparse_point(metadata):
+        raise GitInspectionError(
+            f"Workspace fingerprint refuses Windows reparse point: {path}"
+        )
     return stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
 
 
@@ -405,29 +625,777 @@ def _is_anchor_owned_path(root: Path, path: Path) -> bool:
         return False
 
 
-def _source_files(root: Path) -> list[Path]:
-    if (root / ".git").exists():
-        changed = _git_changed_paths(root)
-        return [path for path in changed if _is_supported_source_file(root, path)]
+def _source_documents(
+    root: Path,
+    *,
+    baseline: dict[str, Any] | None = None,
+) -> list[tuple[str, str, bytes]]:
+    """Return candidate source contents from every publishable Git snapshot.
 
-    return [path for path in root.rglob("*") if _is_supported_source_file(root, path)]
+    A worktree-only scan is insufficient: a safe unstaged file can hide a bad
+    blob already committed to HEAD or staged in the index.  Git-backed tasks
+    therefore scan baseline..HEAD blobs, index blobs, and current
+    unstaged/untracked files independently.  Filesystem-backed tasks retain
+    their materialized-tree semantics because no historical blob store exists.
+    """
 
-
-def git_changed_path_names(root: Path, *, strict: bool = False) -> list[str]:
-    """Return normalized changed paths, including deleted files."""
-
-    git_root = _git_bytes(root, "rev-parse", "--show-toplevel")
-    if git_root is None:
-        if strict:
-            raise GitInspectionError(
-                "Required Git inspection failed: git rev-parse --show-toplevel"
+    if isinstance(baseline, dict) and baseline.get("source") == "filesystem":
+        names = git_changed_path_names(root, baseline=baseline, strict=True)
+        documents = _worktree_source_documents(root, names)
+        git_present, head_exists = _filesystem_git_state(root, baseline)
+        if git_present:
+            documents.extend(
+                _git_source_documents(
+                    root,
+                    baseline=None,
+                    include_head_snapshot=head_exists,
+                )
             )
+        return documents
+
+    if baseline is not None or _validated_git_context(root, strict=False) is not None:
+        # Perform the full baseline/submodule validation before reading blobs.
+        git_changed_path_names(root, baseline=baseline, strict=baseline is not None)
+        return _git_source_documents(root, baseline=baseline)
+
+    names = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if _is_supported_source_file(root, path)
+    ]
+    return _worktree_source_documents(root, names)
+
+
+def _git_source_documents(
+    root: Path,
+    *,
+    baseline: dict[str, Any] | None,
+    display_prefix: str = "",
+    include_head_snapshot: bool = False,
+) -> list[tuple[str, str, bytes]]:
+    context = _validated_git_context(root, strict=baseline is not None)
+    if context is None:
         return []
-    commands = (
+    repository_prefix = context[1]
+    candidates: list[tuple[tuple[str, ...], str, str | None]] = [
+        (
+            (
+                "diff",
+                "--cached",
+                "--relative",
+                "--no-renames",
+                "--diff-filter=ACMRTUXB",
+                "--name-only",
+                "-z",
+                "--",
+            ),
+            "index",
+            "index",
+        ),
+        (
+            (
+                "diff",
+                "--relative",
+                "--no-renames",
+                "--diff-filter=ACMRTUXB",
+                "--name-only",
+                "-z",
+                "--",
+            ),
+            "worktree",
+            None,
+        ),
+        (
+            ("ls-files", "--others", "--exclude-standard", "-z", "--"),
+            "worktree",
+            None,
+        ),
+    ]
+    if baseline is not None:
+        head = baseline.get("head")
+        if not isinstance(head, str) or re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head
+        ) is None:
+            raise GitInspectionError("The approved Git baseline commit is invalid.")
+        candidates.insert(
+            0,
+            (
+                (
+                    "diff",
+                    "--relative",
+                    "--no-renames",
+                    "--diff-filter=ACMRTUXB",
+                    "--name-only",
+                    "-z",
+                    head,
+                    "HEAD",
+                    "--",
+                ),
+                "HEAD",
+                "HEAD",
+            ),
+        )
+
+    documents: list[tuple[str, str, bytes]] = []
+    seen: set[tuple[str, bytes]] = set()
+    for arguments, snapshot, git_object in candidates:
+        output = _git_bytes(root, *arguments)
+        if output is None:
+            raise GitInspectionError(
+                "Required Git source inspection failed: git " + " ".join(arguments)
+            )
+        for name in _normalized_git_names(output):
+            if not _is_supported_source_name(name):
+                continue
+            display_name = f"{display_prefix}{name}"
+            if git_object is None:
+                path = root / name
+                if not _is_regular_file(path):
+                    raise GitInspectionError(
+                        f"Required worktree source disappeared during inspection: {display_name}"
+                    )
+                try:
+                    content = path.read_bytes()
+                except OSError as error:
+                    raise GitInspectionError(
+                        f"Required worktree source is unreadable: {display_name}"
+                    ) from error
+            else:
+                repository_name = (
+                    f"{repository_prefix}/{name}" if repository_prefix else name
+                )
+                object_name = (
+                    f"HEAD:{repository_name}"
+                    if git_object == "HEAD"
+                    else f":0:{repository_name}"
+                )
+                content = _git_bytes(root, "cat-file", "blob", object_name)
+                if content is None:
+                    raise GitInspectionError(
+                        f"Required Git {snapshot} blob is unreadable: {display_name}"
+                    )
+            dedupe_key = (display_name, hashlib.sha256(content).digest())
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            documents.append((display_name, snapshot, content))
+
+    if isinstance(baseline, dict):
+        submodules = baseline.get("submodules", {})
+        if not isinstance(submodules, dict):
+            raise GitInspectionError("The approved Git submodule baseline is invalid.")
+        for name, nested_baseline in sorted(submodules.items()):
+            if not isinstance(nested_baseline, dict):
+                continue
+            nested_root = _materialized_submodule_root(root, name)
+            if nested_root is None:
+                raise GitInspectionError(
+                    f"Git submodule baseline is unavailable after approval: {name}"
+                )
+            documents.extend(
+                _git_source_documents(
+                    nested_root,
+                    baseline=nested_baseline,
+                    display_prefix=f"{display_prefix}{name}/",
+                )
+            )
+    elif baseline is None:
+        if include_head_snapshot:
+            head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
+            if head is None:
+                raise GitInspectionError("Required Git HEAD tree is unavailable.")
+            documents.extend(
+                _git_tree_source_documents(
+                    root,
+                    commit=head.decode("ascii").strip(),
+                    display_prefix=display_prefix,
+                    ancestors=frozenset(),
+                )
+            )
+        for name, oid in sorted(_gitlink_paths(root).items()):
+            nested_root = _materialized_submodule_root(root, name)
+            if nested_root is None:
+                raise GitInspectionError(
+                    f"Git transition submodule is not materialized: {name}"
+                )
+            documents.extend(
+                _git_tree_source_documents(
+                    nested_root,
+                    commit=oid,
+                    display_prefix=f"{display_prefix}{name}/",
+                    ancestors=frozenset(),
+                )
+            )
+            documents.extend(
+                _git_source_documents(
+                    nested_root,
+                    baseline=None,
+                    display_prefix=f"{display_prefix}{name}/",
+                    include_head_snapshot=True,
+                )
+            )
+    return documents
+
+
+def _git_tree_source_documents(
+    root: Path,
+    *,
+    commit: str,
+    display_prefix: str,
+    ancestors: frozenset[str],
+) -> list[tuple[str, str, bytes]]:
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        raise GitInspectionError("Git submodule cycle detected during source inspection.")
+    context = _validated_git_context(root, strict=True)
+    if context is None or _git_bytes(
+        root,
+        "cat-file",
+        "-e",
+        f"{commit}^{{commit}}",
+    ) is None:
+        raise GitInspectionError("Required Git tree commit is unavailable.")
+    output = _git_bytes(
+        root,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        commit,
+        "--",
+        ".",
+    )
+    if output is None:
+        raise GitInspectionError("Required Git tree source enumeration failed.")
+    repository_prefix = context[1]
+    documents: list[tuple[str, str, bytes]] = []
+    for name in _normalized_git_names(output):
+        if not _is_supported_source_name(name):
+            continue
+        repository_name = f"{repository_prefix}/{name}" if repository_prefix else name
+        content = _git_bytes(root, "cat-file", "blob", f"{commit}:{repository_name}")
+        if content is None:
+            raise GitInspectionError(
+                f"Required Git tree blob is unreadable: {display_prefix}{name}"
+            )
+        documents.append((f"{display_prefix}{name}", "HEAD", content))
+    for name, oid in sorted(_gitlink_paths(root, treeish=commit).items()):
+        nested_root = _materialized_submodule_root(root, name)
+        if nested_root is None:
+            raise GitInspectionError(
+                f"Git tree submodule is not materialized: {display_prefix}{name}"
+            )
+        documents.extend(
+            _git_tree_source_documents(
+                nested_root,
+                commit=oid,
+                display_prefix=f"{display_prefix}{name}/",
+                ancestors=ancestors | {identity},
+            )
+        )
+    return documents
+
+
+def _git_tree_path_names(
+    root: Path,
+    *,
+    commit: str,
+    display_prefix: str,
+    ancestors: frozenset[str],
+) -> list[str]:
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        raise GitInspectionError("Git submodule cycle detected during path inspection.")
+    if _validated_git_context(root, strict=True) is None or _git_bytes(
+        root,
+        "cat-file",
+        "-e",
+        f"{commit}^{{commit}}",
+    ) is None:
+        raise GitInspectionError("Required Git transition tree is unavailable.")
+    output = _git_bytes(
+        root,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        commit,
+        "--",
+        ".",
+    )
+    if output is None:
+        raise GitInspectionError("Required Git transition path enumeration failed.")
+    names = [f"{display_prefix}{name}" for name in _normalized_git_names(output)]
+    for name, oid in sorted(_gitlink_paths(root, treeish=commit).items()):
+        nested_root = _materialized_submodule_root(root, name)
+        if nested_root is None:
+            raise GitInspectionError(
+                f"Git transition submodule is not materialized: {display_prefix}{name}"
+            )
+        names.extend(
+            _git_tree_path_names(
+                nested_root,
+                commit=oid,
+                display_prefix=f"{display_prefix}{name}/",
+                ancestors=ancestors | {identity},
+            )
+        )
+    return names
+
+
+def _git_index_submodule_path_names(
+    root: Path,
+    *,
+    display_prefix: str,
+    ancestors: frozenset[str],
+) -> list[str]:
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        raise GitInspectionError("Git submodule cycle detected during index inspection.")
+    names: list[str] = []
+    for name, oid in sorted(_gitlink_paths(root).items()):
+        nested_root = _materialized_submodule_root(root, name)
+        full_prefix = f"{display_prefix}{name}/"
+        if nested_root is None:
+            raise GitInspectionError(
+                f"Git transition submodule is not materialized: {display_prefix}{name}"
+            )
+        names.extend(
+            _git_tree_path_names(
+                nested_root,
+                commit=oid,
+                display_prefix=full_prefix,
+                ancestors=ancestors | {identity},
+            )
+        )
+        names.extend(
+            f"{full_prefix}{path}"
+            for path in git_changed_path_names(
+                nested_root,
+                baseline=None,
+                strict=True,
+            )
+        )
+        names.extend(
+            _git_index_submodule_path_names(
+                nested_root,
+                display_prefix=full_prefix,
+                ancestors=ancestors | {identity},
+            )
+        )
+    return names
+
+
+def _normalized_git_names(output: bytes) -> list[str]:
+    names: list[str] = []
+    for encoded_name in output.split(b"\0"):
+        if not encoded_name:
+            continue
+        name = encoded_name.decode("utf-8", errors="surrogateescape").replace("\\", "/")
+        while name.startswith("./"):
+            name = name[2:]
+        parsed = Path(name)
+        if (
+            not name
+            or name == ".anchor"
+            or name.startswith(".anchor/")
+            or parsed.is_absolute()
+            or bool(parsed.drive)
+            or bool(parsed.root)
+            or ".." in parsed.parts
+        ):
+            continue
+        names.append(name)
+    return names
+
+
+def _worktree_source_documents(
+    root: Path,
+    names: list[str],
+) -> list[tuple[str, str, bytes]]:
+    documents: list[tuple[str, str, bytes]] = []
+    for name in sorted(set(names)):
+        path = root / name
+        if not _is_supported_source_file(root, path):
+            continue
+        try:
+            documents.append((name, "worktree", path.read_bytes()))
+        except OSError as error:
+            raise GitInspectionError(
+                f"Required worktree source is unreadable: {name}"
+            ) from error
+    return documents
+
+
+def _is_supported_source_name(name: str) -> bool:
+    path = Path(name)
+    return (
+        not any(part in _SKIP_DIRECTORIES for part in path.parts)
+        and (path.suffix.lower() in _TEXT_SUFFIXES or path.name.startswith(".env"))
+    )
+
+
+def task_change_baseline(root: Path) -> dict[str, Any]:
+    """Capture the material task baseline used by actual-diff gates.
+
+    A Git commit is the compact, authoritative baseline when HEAD exists. An
+    unborn or non-Git workspace falls back to the same materialized-file
+    semantics used by workspace fingerprints, represented as per-path digests
+    so later gates can still identify risky paths.
+    """
+
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as error:
+        raise GitInspectionError(
+            "Required task baseline root inspection failed."
+        ) from error
+    return _task_change_baseline(resolved_root, ancestors=frozenset())
+
+
+def _task_change_baseline(
+    root: Path,
+    *,
+    ancestors: frozenset[str],
+) -> dict[str, Any]:
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        raise GitInspectionError("Git submodule cycle detected while capturing the task baseline.")
+
+    git_context = _validated_git_context(root, strict=False)
+    if git_context is not None:
+        head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
+        prefix = git_context[1]
+        if head:
+            head_text = head.decode("ascii", errors="strict").strip()
+            return _git_change_baseline_at_commit(
+                root,
+                head=head_text,
+                project_prefix=prefix,
+                ancestors=ancestors | {identity},
+            )
+        baseline = _filesystem_change_baseline(root)
+        baseline["git_context"] = "unborn"
+        baseline["git_unborn"] = True
+        baseline["project_prefix"] = prefix
+        return baseline
+    try:
+        baseline = _filesystem_change_baseline(root)
+        baseline["git_context"] = "none"
+        return baseline
+    except OSError as error:
+        raise GitInspectionError(
+            f"Required filesystem baseline inspection failed: {error}"
+        ) from error
+
+
+def _filesystem_change_baseline(root: Path) -> dict[str, Any]:
+    entries: dict[str, str] = {}
+    total_bytes = 0
+    for path in sorted(
+        _strict_task_baseline_files(root),
+        key=lambda candidate: candidate.relative_to(root).as_posix(),
+    ):
+        digest, measured_bytes = _strict_task_file_digest(
+            root,
+            path,
+            remaining_bytes=_TASK_BASELINE_MAX_BYTES - total_bytes,
+        )
+        total_bytes += measured_bytes
+        entries[path.relative_to(root).as_posix()] = digest
+    return {
+        "source": "filesystem",
+        "format_version": 1,
+        "entries": entries,
+        "entry_count": len(entries),
+        "total_bytes": total_bytes,
+    }
+
+
+def _strict_task_baseline_files(root: Path) -> list[Path]:
+    """Enumerate task-baseline files without the fingerprint's soft failures."""
+
+    files: list[Path] = []
+    pending = [root]
+    inspected_entries = 0
+    while pending:
+        directory = pending.pop()
+        # pathlib.rglob intentionally suppresses selected scandir errors on
+        # current Python releases. A security baseline must propagate them.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                inspected_entries += 1
+                if inspected_entries > _TASK_BASELINE_MAX_ENTRIES:
+                    raise OSError(
+                        "Task baseline entry limit exceeded "
+                        f"({_TASK_BASELINE_MAX_ENTRIES})."
+                    )
+                if entry.name in _SKIP_DIRECTORIES:
+                    continue
+                path = Path(entry.path)
+                metadata = os.lstat(path)
+                if _is_windows_reparse_point(metadata):
+                    raise OSError(
+                        f"Task baseline refuses Windows reparse point: {path}"
+                    )
+                if stat.S_ISLNK(metadata.st_mode):
+                    files.append(path)
+                elif stat.S_ISDIR(metadata.st_mode):
+                    pending.append(path)
+                elif stat.S_ISREG(metadata.st_mode):
+                    files.append(path)
+    return files
+
+
+def _is_windows_reparse_point(metadata: os.stat_result) -> bool:
+    return os.name == "nt" and bool(
+        getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT
+    )
+
+
+def _strict_task_file_digest(
+    root: Path,
+    path: Path,
+    *,
+    remaining_bytes: int,
+) -> tuple[str, int]:
+    """Digest one baseline file, raising on every inspection/read failure."""
+
+    digest = hashlib.sha256()
+    digest.update(b"anchorloop-task-file-v1\0")
+    relative_path = path.relative_to(root).as_posix().encode(
+        "utf-8",
+        errors="surrogateescape",
+    )
+    metadata = os.lstat(path)
+    if _is_windows_reparse_point(metadata):
+        raise OSError(f"Task baseline refuses Windows reparse point: {path}")
+    mode = str(stat.S_IMODE(metadata.st_mode)).encode("ascii")
+    if stat.S_ISLNK(metadata.st_mode):
+        target = os.readlink(path).encode("utf-8", errors="surrogateescape")
+        if len(target) > remaining_bytes:
+            raise OSError(
+                f"Task baseline byte limit exceeded ({_TASK_BASELINE_MAX_BYTES})."
+            )
+        _update_digest_value(digest, b"entry", b"symlink")
+        _update_digest_value(digest, b"path", relative_path)
+        _update_digest_value(digest, b"mode", mode)
+        _update_digest_value(digest, b"target", target)
+        return f"sha256:{digest.hexdigest()}", len(target)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError(f"Task baseline path changed type while scanning: {path}")
+
+    file_digest = hashlib.sha256()
+    size = 0
+    if metadata.st_size > remaining_bytes:
+        raise OSError(
+            f"Task baseline byte limit exceeded ({_TASK_BASELINE_MAX_BYTES})."
+        )
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (metadata.st_dev, metadata.st_ino):
+            raise OSError("task baseline target changed while it was opened")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            while chunk := stream.read(
+                min(1024 * 1024, max(1, remaining_bytes - size + 1))
+            ):
+                size += len(chunk)
+                if size > remaining_bytes:
+                    raise OSError(
+                        "Task baseline byte limit exceeded "
+                        f"({_TASK_BASELINE_MAX_BYTES})."
+                    )
+                file_digest.update(chunk)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    _update_digest_value(digest, b"entry", b"file")
+    _update_digest_value(digest, b"path", relative_path)
+    _update_digest_value(digest, b"mode", mode)
+    _update_digest_value(digest, b"size", str(size).encode("ascii"))
+    _update_digest_value(digest, b"content-sha256", file_digest.digest())
+    return f"sha256:{digest.hexdigest()}", size
+
+
+def _gitlink_paths(root: Path, *, treeish: str | None = None) -> dict[str, str]:
+    staged = (
+        _git_bytes(root, "ls-files", "--stage", "-z", "--")
+        if treeish is None
+        else _git_bytes(root, "ls-tree", "-r", "-z", treeish, "--", ".")
+    )
+    if staged is None:
+        raise GitInspectionError("Required Git submodule inspection failed: git ls-files")
+    gitlinks: dict[str, str] = {}
+    for record in staged.split(b"\0"):
+        if not record or b"\t" not in record:
+            continue
+        metadata, encoded_name = record.split(b"\t", 1)
+        fields = metadata.split()
+        if fields[:1] != [b"160000"]:
+            continue
+        oid_index = 1 if treeish is None else 2
+        if len(fields) <= oid_index:
+            raise GitInspectionError("Required Git submodule record is malformed.")
+        name = encoded_name.decode(
+            "utf-8",
+            errors="surrogateescape",
+        ).replace("\\", "/")
+        while name.startswith("./"):
+            name = name[2:]
+        gitlinks[name] = fields[oid_index].decode("ascii", errors="strict")
+    return gitlinks
+
+
+def _materialized_submodule_root(root: Path, name: str) -> Path | None:
+    candidate = root / Path(name)
+    try:
+        metadata = os.lstat(candidate)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise GitInspectionError(
+            f"Git submodule path cannot be inspected safely: {name}"
+        ) from error
+    if (
+        _is_windows_reparse_point(metadata)
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+    ):
+        raise GitInspectionError(f"Git submodule path is unsafe: {name}")
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError) as error:
+        raise GitInspectionError(f"Git submodule path escapes the project: {name}") from error
+    nested_git_root = _git_bytes(candidate, "rev-parse", "--show-toplevel")
+    if nested_git_root is None:
+        return None
+    try:
+        discovered = Path(
+            nested_git_root.decode("utf-8", errors="surrogateescape").strip()
+        ).resolve(strict=True)
+    except OSError as error:
+        raise GitInspectionError(f"Git submodule root is unavailable: {name}") from error
+    if os.path.normcase(str(discovered)) != os.path.normcase(str(resolved)):
+        # An empty/uninitialized gitlink directory inherits the parent repo
+        # when Git searches upward; it is not a materialized submodule.
+        return None
+    return resolved
+
+
+def _git_change_baseline_at_commit(
+    root: Path,
+    *,
+    head: str,
+    project_prefix: str,
+    ancestors: frozenset[str],
+) -> dict[str, Any]:
+    gitlinks = _gitlink_paths(root, treeish=head)
+    baselines: dict[str, dict[str, Any] | None] = {}
+    for name, oid in sorted(gitlinks.items()):
+        nested_root = _materialized_submodule_root(root, name)
+        if nested_root is None:
+            baselines[name] = None
+            continue
+        identity = os.path.normcase(str(nested_root.resolve()))
+        if identity in ancestors:
+            raise GitInspectionError(
+                "Git submodule cycle detected while capturing the task baseline."
+            )
+        nested_context = _validated_git_context(nested_root, strict=True)
+        if nested_context is None or _git_bytes(
+            nested_root,
+            "cat-file",
+            "-e",
+            f"{oid}^{{commit}}",
+        ) is None:
+            raise GitInspectionError(
+                f"Approved Git submodule commit is unavailable: {name}"
+            )
+        baselines[name] = _git_change_baseline_at_commit(
+            nested_root,
+            head=oid,
+            project_prefix=nested_context[1],
+            ancestors=ancestors | {identity},
+        )
+    return {
+        "source": "git",
+        "format_version": 1,
+        "head": head,
+        "project_prefix": project_prefix,
+        "submodule_oids": gitlinks,
+        "submodules": baselines,
+    }
+
+
+def git_changed_path_names(
+    root: Path,
+    *,
+    baseline: dict[str, Any] | None = None,
+    strict: bool = False,
+) -> list[str]:
+    """Return normalized changed paths, including committed and deleted files.
+
+    With a task baseline, Git repositories include ``baseline..HEAD`` plus
+    staged, unstaged, and untracked paths. Filesystem baselines compare the
+    current materialized per-path digests instead.
+    """
+
+    if baseline is not None and baseline.get("source") == "filesystem":
+        return _filesystem_changed_path_names(root, baseline, strict=strict)
+
+    git_context = _validated_git_context(root, strict=strict)
+    if git_context is None:
+        return []
+    commands: tuple[tuple[str, ...], ...] = (
         ("diff", "--relative", "--no-renames", "--name-only", "-z", "--"),
         ("diff", "--cached", "--relative", "--no-renames", "--name-only", "-z", "--"),
         ("ls-files", "--others", "--exclude-standard", "-z", "--"),
     )
+    if baseline is not None:
+        if baseline.get("source") != "git":
+            raise GitInspectionError("The approved task change baseline is invalid.")
+        head = baseline.get("head")
+        if not isinstance(head, str) or re.fullmatch(
+            r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head
+        ) is None:
+            raise GitInspectionError("The approved Git baseline commit is invalid.")
+        expected_prefix = baseline.get("project_prefix")
+        current_prefix = _git_bytes(root, "rev-parse", "--show-prefix")
+        if current_prefix is None:
+            raise GitInspectionError(
+                "Required Git inspection failed: git rev-parse --show-prefix"
+            )
+        normalized_prefix = current_prefix.decode(
+            "utf-8", errors="surrogateescape"
+        ).replace("\\", "/").strip().strip("/")
+        if not isinstance(expected_prefix, str) or normalized_prefix != expected_prefix:
+            raise GitInspectionError(
+                "The approved Git baseline belongs to a different project path."
+            )
+        if _git_bytes(root, "merge-base", "--is-ancestor", head, "HEAD") is None:
+            raise GitInspectionError(
+                "The approved Git baseline is no longer an ancestor of HEAD."
+            )
+        commands = (
+            (
+                "diff",
+                "--relative",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                head,
+                "HEAD",
+                "--",
+            ),
+            *commands,
+        )
     paths: set[str] = set()
     for arguments in commands:
         output = _git_bytes(root, *arguments)
@@ -447,13 +1415,175 @@ def git_changed_path_names(root: Path, *, strict: bool = False) -> list[str]:
             if not name or name == ".anchor" or name.startswith(".anchor/"):
                 continue
             paths.add(name)
+    if baseline is not None:
+        expected_submodules = baseline.get("submodules", {})
+        if not isinstance(expected_submodules, dict):
+            raise GitInspectionError("The approved Git submodule baseline is invalid.")
+        expected_submodule_oids = baseline.get("submodule_oids", {})
+        if (
+            not isinstance(expected_submodule_oids, dict)
+            or set(expected_submodule_oids) != set(expected_submodules)
+        ):
+            raise GitInspectionError("The approved Git submodule OIDs are invalid.")
+        current_submodules = _gitlink_paths(root)
+        if set(current_submodules) != set(expected_submodules):
+            raise GitInspectionError(
+                "The approved Git submodule set changed; revise and approve the plan again."
+            )
+        for name, nested_baseline in sorted(expected_submodules.items()):
+            if not isinstance(name, str) or not name:
+                raise GitInspectionError("The approved Git submodule path is invalid.")
+            nested_root = _materialized_submodule_root(root, name)
+            if current_submodules[name] != expected_submodule_oids.get(name):
+                if nested_root is None:
+                    raise GitInspectionError(
+                        f"Git submodule commit changed without a materialized tree: {name}"
+                    )
+                current_head = _git_bytes(
+                    nested_root,
+                    "rev-parse",
+                    "--verify",
+                    "HEAD",
+                )
+                if (
+                    current_head is None
+                    or current_head.decode("ascii", errors="strict").strip()
+                    != current_submodules[name]
+                ):
+                    raise GitInspectionError(
+                        f"Git submodule index and materialized commit disagree: {name}"
+                    )
+            if nested_baseline is None:
+                if nested_root is not None:
+                    raise GitInspectionError(
+                        f"Git submodule materialization changed after approval: {name}"
+                    )
+                continue
+            if not isinstance(nested_baseline, dict) or nested_root is None:
+                raise GitInspectionError(
+                    f"Git submodule baseline is unavailable after approval: {name}"
+                )
+            nested_paths = git_changed_path_names(
+                nested_root,
+                baseline=nested_baseline,
+                strict=True,
+            )
+            paths.update(f"{name}/{nested_path}" for nested_path in nested_paths)
     return sorted(paths)
 
 
-def _git_changed_paths(root: Path) -> list[Path]:
+def _filesystem_changed_path_names(
+    root: Path,
+    baseline: dict[str, Any],
+    *,
+    strict: bool,
+) -> list[str]:
+    entries = baseline.get("entries")
+    if (
+        baseline.get("format_version") != 1
+        or not isinstance(entries, dict)
+        or not all(
+            isinstance(path, str) and isinstance(digest, str)
+            for path, digest in entries.items()
+        )
+    ):
+        if strict:
+            raise GitInspectionError("The approved filesystem baseline is invalid.")
+        return []
+    try:
+        current = _filesystem_change_baseline(root)["entries"]
+    except OSError as error:
+        if strict:
+            raise GitInspectionError(
+                f"Required filesystem baseline inspection failed: {error}"
+            ) from error
+        return []
+    changed = {
+        path
+        for path in set(entries) | set(current)
+        if entries.get(path) != current.get(path)
+    }
+    git_present, head_exists = _filesystem_git_state(root, baseline)
+    if git_present:
+        commands: list[tuple[str, ...]] = [
+            ("diff", "--cached", "--relative", "--no-renames", "--name-only", "-z", "--"),
+            ("diff", "--relative", "--no-renames", "--name-only", "-z", "--"),
+            ("ls-files", "--others", "--exclude-standard", "-z", "--"),
+        ]
+        if head_exists:
+            commands.insert(
+                0,
+                ("ls-tree", "-r", "--name-only", "-z", "HEAD", "--", "."),
+            )
+        for arguments in commands:
+            output = _git_bytes(root, *arguments)
+            if output is None:
+                raise GitInspectionError(
+                    "Required unborn Git inspection failed: git "
+                    + " ".join(arguments)
+                )
+            changed.update(_normalized_git_names(output))
+        if head_exists:
+            head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
+            if head is None:
+                raise GitInspectionError("Required Git transition HEAD is unavailable.")
+            changed.update(
+                _git_tree_path_names(
+                    root,
+                    commit=head.decode("ascii").strip(),
+                    display_prefix="",
+                    ancestors=frozenset(),
+                )
+            )
+        changed.update(
+            _git_index_submodule_path_names(
+                root,
+                display_prefix="",
+                ancestors=frozenset(),
+            )
+        )
+    return sorted(changed)
+
+
+def _filesystem_git_state(
+    root: Path,
+    baseline: dict[str, Any],
+) -> tuple[bool, bool]:
+    context_kind = baseline.get("git_context")
+    was_unborn = baseline.get("git_unborn") is True or context_kind == "unborn"
+    context = _validated_git_context(root, strict=was_unborn)
+    if context is None:
+        if was_unborn or (root / ".git").exists():
+            raise GitInspectionError(
+                "The approved filesystem baseline Git context is unavailable."
+            )
+        return False, False
+    if context_kind == "none":
+        raise GitInspectionError(
+            "Git was initialized after the filesystem task baseline was approved; "
+            "the task must restart from a Git-backed approval."
+        )
+    if was_unborn:
+        expected_prefix = baseline.get("project_prefix")
+        if not isinstance(expected_prefix, str) or context[1] != expected_prefix:
+            raise GitInspectionError(
+                "The approved unborn Git baseline belongs to a different project path."
+            )
+    return True, _git_bytes(root, "rev-parse", "--verify", "HEAD") is not None
+
+
+def _git_changed_paths(
+    root: Path,
+    *,
+    baseline: dict[str, Any] | None = None,
+) -> list[Path]:
     paths = [
         root / relative_name
-        for relative_name in git_changed_path_names(root)
+        for relative_name in git_changed_path_names(
+            root,
+            baseline=baseline,
+            strict=baseline is not None,
+        )
     ]
     return [path for path in paths if _is_regular_file(path)]
 
@@ -464,30 +1594,35 @@ def _is_supported_source_file(root: Path, path: Path) -> bool:
     return path.suffix.lower() in _TEXT_SUFFIXES or path.name.startswith(".env")
 
 
-def _python_syntax_failures(root: Path, files: list[Path]) -> list[dict[str, str]]:
+def _python_syntax_failures(
+    documents: list[tuple[str, str, bytes]],
+) -> list[dict[str, str]]:
     failures = []
-    for path in files:
-        if path.suffix != ".py":
+    for name, snapshot, content in documents:
+        if Path(name).suffix != ".py":
             continue
         try:
-            compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            text = content.decode("utf-8")
+            compile(text, name, "exec")
         except (SyntaxError, UnicodeDecodeError) as error:
             line = getattr(error, "lineno", None)
             failures.append(
                 {
                     "category": "syntax",
-                    "location": _location(root, path, line),
+                    "location": _snapshot_location(name, snapshot, line),
                     "message": str(error),
                 }
             )
     return failures
 
 
-def _secret_findings(root: Path, files: list[Path]) -> list[dict[str, str]]:
+def _secret_findings(
+    documents: list[tuple[str, str, bytes]],
+) -> list[dict[str, str]]:
     findings = []
-    for path in files:
+    for name, snapshot, content in documents:
         try:
-            text = path.read_text(encoding="utf-8")
+            text = content.decode("utf-8")
         except UnicodeDecodeError:
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):
@@ -495,11 +1630,16 @@ def _secret_findings(root: Path, files: list[Path]) -> list[dict[str, str]]:
                 findings.append(
                     {
                         "category": "secret",
-                        "location": _location(root, path, line_number),
+                        "location": _snapshot_location(name, snapshot, line_number),
                         "message": "Possible hard-coded credential or private key.",
                     }
                 )
     return findings
+
+
+def _snapshot_location(name: str, snapshot: str, line: int | None = None) -> str:
+    location = name if snapshot == "worktree" else f"{name} [{snapshot}]"
+    return f"{location}:{line}" if line else location
 
 
 def _location(root: Path, path: Path, line: int | None = None) -> str:
@@ -511,19 +1651,19 @@ def _location(root: Path, path: Path, line: int | None = None) -> str:
 
 
 def _git_whitespace_check(root: Path, arguments: tuple[str, ...], name: str) -> dict[str, str]:
-    if not (root / ".git").exists():
+    if _validated_git_context(root, strict=False) is None:
         return {"name": name, "status": "not-run", "detail": "not a Git repository"}
-    process = subprocess.run(
-        ["git", *arguments],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    process = _run_git(root, *arguments)
+    if process is None:
+        return {"name": name, "status": "failed", "detail": "Git is unavailable"}
     if process.returncode == 0:
         return {"name": name, "status": "passed"}
     return {
         "name": name,
         "status": "failed",
-        "detail": process.stdout.strip() or process.stderr.strip() or "git diff --check failed",
+        "detail": (
+            process.stdout.decode("utf-8", errors="replace").strip()
+            or process.stderr.decode("utf-8", errors="replace").strip()
+            or "git diff --check failed"
+        ),
     }

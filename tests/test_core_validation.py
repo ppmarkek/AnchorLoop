@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from anchorloop.cli import _print_experiment_report
 from anchorloop.project import AnchorError, AnchorProject
 from tests.git_fixture import init_git_repository
 
@@ -58,6 +61,23 @@ class CoreValidationTests(unittest.TestCase):
         project.transition("review")
         project.precommit()
         return project
+
+    def _closed_project(
+        self,
+        root: Path,
+        *,
+        mode: str = "STANDARD",
+    ) -> tuple[AnchorProject, dict[str, object], Path]:
+        project = self._project_ready_for_verification(root, mode=mode)
+        project.verify_task(
+            by="Ada Engineer",
+            result="pass",
+            reason="The documented acceptance scenario passed.",
+            recall="Persisted retry state prevents duplicate acknowledgement.",
+        )
+        closed = project.transition("close")
+        closed_path = root / ".anchor" / "tasks" / "closed" / f"{closed['id']}.json"
+        return project, closed, closed_path
 
     def test_public_record_brief_requires_exact_complete_text_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -278,6 +298,256 @@ class CoreValidationTests(unittest.TestCase):
                 score=4,
             )
             self.assertEqual(recalled["comprehension"]["delayed_recall"]["score"], 4)
+
+            legacy_observations = json.loads(
+                closed_path.read_text(encoding="utf-8")
+            )
+            legacy_observations["comprehension"]["delayed_recall"].pop(
+                "record_digest"
+            )
+            closed_path.write_text(
+                json.dumps(legacy_observations),
+                encoding="utf-8",
+            )
+            project.record_post_completion_outcome(
+                task_id=task_id,
+                by="Ada Engineer",
+                defects_found=1,
+                rollback=False,
+                corrective_refactor=True,
+                notes="A legacy follow-up observation remains readable.",
+            )
+            legacy_observations = json.loads(
+                closed_path.read_text(encoding="utf-8")
+            )
+            legacy_observations["post_completion_outcomes"][-1].pop(
+                "record_digest"
+            )
+            closed_path.write_text(
+                json.dumps(legacy_observations),
+                encoding="utf-8",
+            )
+
+            report = project.experiment_report()
+            row = report["tasks"][0]
+            self.assertEqual(
+                row["delayed_recall_integrity"],
+                "legacy-unverified",
+            )
+            self.assertEqual(
+                row["latest_outcome_integrity"],
+                "legacy-unverified",
+            )
+            self.assertEqual(row["legacy_unverified_observations"], 2)
+            self.assertEqual(
+                report["summary"]["legacy_unverified_observations"],
+                2,
+            )
+            csv_output = io.StringIO()
+            with redirect_stdout(csv_output):
+                _print_experiment_report(report, output_format="csv")
+            csv_text = csv_output.getvalue()
+            header = csv_text.splitlines()[0]
+            self.assertIn("delayed_recall_integrity", header)
+            self.assertIn("latest_outcome_integrity", header)
+            self.assertIn("legacy_unverified_observations", header)
+            self.assertEqual(csv_text.count("legacy-unverified"), 2)
+
+    def test_current_post_close_records_require_record_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project_ready_for_verification(root, mode="CAREFUL")
+            project.verify_task(
+                by="Ada Engineer",
+                result="pass",
+                reason="The documented acceptance scenario passed.",
+                recall="Persisted retry state prevents duplicate acknowledgement.",
+            )
+            closed = project.transition("close")
+            closed_path = (
+                root / ".anchor" / "tasks" / "closed" / f"{closed['id']}.json"
+            )
+            due_at = closed["comprehension"]["recall_due_at"]
+            closed["comprehension"]["delayed_recall"] = {
+                "statement": "The retry boundary remains the key trade-off.",
+                "score": 4,
+                "by": "Ada Engineer",
+                "due_at": due_at,
+                "recorded_at": due_at,
+                "delay_seconds": 0.0,
+            }
+            closed_path.write_text(json.dumps(closed), encoding="utf-8")
+            with self.assertRaisesRegex(
+                AnchorError,
+                "Protected delayed recall records require a record digest",
+            ):
+                project.experiment_report()
+
+            closed["comprehension"].pop("delayed_recall")
+            closed["post_completion_outcomes"] = [
+                {
+                    "at": closed["metrics"]["closed_at"],
+                    "by": "Ada Engineer",
+                    "defects_found": 0,
+                    "rollback": False,
+                    "corrective_refactor": False,
+                    "notes": "No follow-up defect was observed.",
+                    "provenance": "reported-post-completion",
+                }
+            ]
+            closed_path.write_text(json.dumps(closed), encoding="utf-8")
+            with self.assertRaisesRegex(
+                AnchorError,
+                "Protected post-completion outcome records require a record digest",
+            ):
+                project.experiment_report()
+
+    def test_schema_v2_without_post_close_discriminator_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, closed, closed_path = self._closed_project(root)
+            recorded = project.record_post_completion_outcome(
+                task_id=str(closed["id"]),
+                by="Ada Engineer",
+                defects_found=0,
+                rollback=False,
+                corrective_refactor=False,
+                notes="Historical schema-v2 observation.",
+            )
+            legacy = json.loads(json.dumps(recorded))
+            legacy.pop("post_close_integrity")
+            outcome = legacy["post_completion_outcomes"][0]
+            for field in (
+                "record_digest",
+                "record_type",
+                "task_id",
+                "sequence",
+                "previous_digest",
+            ):
+                outcome.pop(field)
+            legacy["close_digest"] = project._closed_task_digest(legacy)
+            closed_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            report = project.experiment_report()
+            self.assertEqual(report["tasks"][0]["latest_outcome_integrity"], "legacy-unverified")
+            self.assertEqual(report["summary"]["legacy_unverified_observations"], 1)
+
+    def test_post_close_chain_rejects_replay_reorder_delete_and_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project, closed, closed_path = self._closed_project(root)
+            for index in range(2):
+                project.record_post_completion_outcome(
+                    task_id=str(closed["id"]),
+                    by="Ada Engineer",
+                    defects_found=index,
+                    rollback=False,
+                    corrective_refactor=False,
+                    notes=f"Follow-up observation {index + 1}.",
+                )
+            pristine = json.loads(closed_path.read_text(encoding="utf-8"))
+
+            def replay_from_another_task(task: dict[str, object]) -> None:
+                record = task["post_completion_outcomes"][1]  # type: ignore[index]
+                record["task_id"] = "al-20000101-deadbe"
+                record["record_digest"] = project._record_digest(record)
+                task["post_close_integrity"]["head_digest"] = record["record_digest"]  # type: ignore[index]
+
+            tamper_cases = {
+                "replay": replay_from_another_task,
+                "reorder": lambda task: task["post_completion_outcomes"].reverse(),
+                "delete": lambda task: task["post_completion_outcomes"].pop(0),
+                "duplicate": lambda task: task["post_completion_outcomes"].__setitem__(
+                    1, json.loads(json.dumps(task["post_completion_outcomes"][0]))
+                ),
+            }
+            for name, tamper in tamper_cases.items():
+                with self.subTest(name=name):
+                    candidate = json.loads(json.dumps(pristine))
+                    tamper(candidate)
+                    closed_path.write_text(json.dumps(candidate), encoding="utf-8")
+                    with self.assertRaises(AnchorError):
+                        project.experiment_report()
+            closed_path.write_text(json.dumps(pristine), encoding="utf-8")
+            self.assertEqual(
+                project.experiment_report()["tasks"][0]["latest_outcome_integrity"],
+                "chain-verified",
+            )
+
+    def test_delayed_recall_record_rejects_digest_preserving_type_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project_ready_for_verification(root, mode="CAREFUL")
+            project.verify_task(
+                by="Ada Engineer",
+                result="pass",
+                reason="The documented acceptance scenario passed.",
+                recall="Persisted retry state prevents duplicate acknowledgement.",
+            )
+            active_path = root / ".anchor" / "tasks" / "active.json"
+            legacy = json.loads(active_path.read_text(encoding="utf-8"))
+            due_at = datetime.now(UTC) - timedelta(minutes=1)
+            legacy["comprehension"].pop("recall_delay_hours")
+            legacy["comprehension"]["recall_due_at"] = due_at.isoformat()
+            legacy.pop("schema_version")
+            for field in (
+                "subject_digest",
+                "reported_metrics",
+                "comprehension_digest",
+                "record_digest",
+            ):
+                legacy["verification"].pop(field)
+            legacy["approval"].pop("record_digest")
+            legacy["approval"].update(
+                project._task_approval_digests(project._task_approval_subject(legacy))
+            )
+            active_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            closed = project.transition("close")
+            closed_path = root / ".anchor" / "tasks" / "closed" / f"{closed['id']}.json"
+            recorded = project.record_delayed_recall(
+                task_id=closed["id"],
+                by="Ada Engineer",
+                response="The retry boundary remains the key trade-off.",
+                score=2,
+            )
+            recall_record = recorded["comprehension"]["delayed_recall"]
+            self.assertRegex(recall_record["record_digest"], r"^sha256:[0-9a-f]{64}$")
+
+            tampered = json.loads(closed_path.read_text(encoding="utf-8"))
+            tampered["comprehension"]["delayed_recall"]["score"] = 5
+            closed_path.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(AnchorError, "delayed recall record digest"):
+                project.experiment_report()
+
+    def test_post_completion_outcome_rejects_digest_preserving_type_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project_ready_for_verification(root)
+            project.verify_task(
+                by="Ada Engineer",
+                result="pass",
+                reason="The documented acceptance scenario passed.",
+                recall="Persisted retry state prevents duplicate acknowledgement.",
+            )
+            closed = project.transition("close")
+            closed_path = root / ".anchor" / "tasks" / "closed" / f"{closed['id']}.json"
+            recorded = project.record_post_completion_outcome(
+                task_id=closed["id"],
+                by="Ada Engineer",
+                defects_found=0,
+                rollback=False,
+                corrective_refactor=False,
+                notes="No follow-up defect was observed.",
+            )
+            outcome = recorded["post_completion_outcomes"][-1]
+            self.assertRegex(outcome["record_digest"], r"^sha256:[0-9a-f]{64}$")
+
+            tampered = json.loads(closed_path.read_text(encoding="utf-8"))
+            tampered["post_completion_outcomes"][-1]["defects_found"] = 9
+            closed_path.write_text(json.dumps(tampered), encoding="utf-8")
+            with self.assertRaisesRegex(AnchorError, "post-completion outcome record digest"):
+                project.experiment_report()
 
     def test_task_schema_rejects_manually_malformed_brief_before_transition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

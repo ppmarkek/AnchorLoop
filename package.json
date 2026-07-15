@@ -47,7 +47,7 @@
   ],
   "scripts": {
     "test": "npm run test:npm",
-    "test:npm": "node --test npm/test/anchorloop.test.js npm/test/version.test.js",
+    "test:npm": "node --test npm/test/anchorloop.test.js npm/test/release-docs.test.js npm/test/version.test.js",
     "version:check": "node npm/scripts/version.js",
     "prepack": "npm run version:check",
     "pack:check": "npm pack --dry-run",
