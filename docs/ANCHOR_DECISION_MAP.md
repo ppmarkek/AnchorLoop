@@ -1,15 +1,15 @@
 # AnchorLoop release decision map
 
-This map separates resolved 0.1 decisions from external release blockers and
+This map separates resolved 0.2 decisions from external release gates and
 post-release product questions.
 
-## Resolved for 0.1
+## Resolved for 0.2
 
 | Decision | Resolution |
 |---|---|
 | Core runtime | Python 3.11+ owns workflow/state; the npm package is a thin Node 18+ launcher around bundled Python source. |
 | Source of truth | The CLI and `.anchor/` state, never a Codex-only skill, model, provider, or slash-command format. |
-| Skill distribution | Project or user scope; generic `.agents/skills` and explicit `.codex/skills`; preview/apply and owned-file uninstall. |
+| Skill distribution | Project or user scope across the six documented filesystem destinations; preview/apply and owned-file uninstall. Real-host discovery remains Experimental. |
 | Version source | `src/anchorloop/version.py`; Python metadata reads it and npm/tag values are checked against it. |
 | Mutation model | One interprocess lock plus validated redo journal and ordered event outbox for every project mutation. |
 | Quality fingerprint | Materialized tracked/non-ignored files, recursively including submodules; Git metadata is diagnostic only. |
@@ -17,17 +17,18 @@ post-release product questions.
 | Cache/recovery state | Ignored local runtime data; never committed as workflow evidence. |
 | Trust statement | `--by` and interactive TTY confirmation are auditable provenance, not authenticated identity. |
 
-## External release blocker
+## Human-owned release gate
 
-### npm name bootstrap
+### Publish the immutable 0.2.0 version
 
-`anchorloop` currently returns E404 in the public registry. A maintainer must
-either reserve it with a lower, version-consistent bootstrap release (for
-example `0.0.0`) or switch every manifest, runner, workflow, and document to an
-owned scope. The bootstrap must not consume the intended alpha version: npm
-versions are immutable, while `0.1.0` must be published from its signed tag
-with OIDC provenance. No code path may claim that `npx anchorloop install`
-works publicly before registry smoke succeeds.
+`anchorloop@0.1.0` is published production. Current `main` is the unreleased
+`0.2.0` release candidate. A maintainer must merge the green release PR, create
+a GitHub-verified signed annotated `v0.2.0` tag, and push only that tag. The
+workflow then verifies the canonical version, refuses an existing exact npm
+version, publishes through OIDC, runs the registry lifecycle, and checks npm
+`gitHead` against the tagged commit. No code path or document may claim that
+the `0.2.0` guided installer is available from npm `latest` before this gate
+succeeds.
 
 ## Decisions before public beta
 

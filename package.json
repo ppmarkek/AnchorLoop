@@ -1,6 +1,6 @@
 {
   "name": "anchorloop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Engineer-controlled, agent-neutral workflow for AI-assisted software delivery.",
   "license": "MIT",
   "repository": {
@@ -38,6 +38,7 @@
     "src/anchorloop/skills/",
     "pyproject.toml",
     "README.md",
+    "CHANGELOG.md",
     "CONTEXT.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
@@ -51,8 +52,5 @@
     "prepack": "npm run version:check",
     "pack:check": "npm pack --dry-run",
     "registry:smoke": "node npm/scripts/registry-smoke.js"
-  },
-  "dependencies": {
-    "anchorloop": "^0.1.0"
   }
 }

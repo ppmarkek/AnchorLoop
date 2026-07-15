@@ -109,6 +109,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
+      - run: npm ci --ignore-scripts
+      - run: npm run version:check
       - run: npm test
       - run: npm run pack:check
       - name: Smoke-test the packed npx launcher
@@ -157,6 +159,7 @@ jobs:
             Push-Location -LiteralPath $project
             try {
               Invoke-PackedAnchor add --apply
+              Invoke-PackedAnchor doctor --strict
               foreach ($ignored in @(
                 "cache/example",
                 ".cache/example",
@@ -213,7 +216,9 @@ jobs:
                 --corrective-refactor no `
                 --notes "No post-completion issue in the packed smoke window."
               Invoke-PackedAnchor report --format json
+              Invoke-PackedAnchor doctor --strict
               Invoke-PackedAnchor uninstall
+              Invoke-PackedAnchor doctor --strict
             } finally {
               Pop-Location
             }
@@ -224,6 +229,16 @@ jobs:
             foreach ($forbidden in @(".agents", "node_modules", "cache", ".cache", ".npm", ".npm-cache", "__pycache__")) {
               if (Test-Path -LiteralPath (Join-Path $project $forbidden)) {
                 throw "Packed lifecycle leaked $forbidden into the project."
+              }
+            }
+            foreach ($relative in @(".anchor/transactions/pending", ".anchor/outbox")) {
+              $directory = Join-Path $project $relative
+              if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+                throw "Packed lifecycle did not retain the expected $relative directory."
+              }
+              $residue = @(Get-ChildItem -LiteralPath $directory -Force -File)
+              if ($residue.Count -ne 0) {
+                throw "Packed lifecycle retained recovery residue in $relative."
               }
             }
           } finally {

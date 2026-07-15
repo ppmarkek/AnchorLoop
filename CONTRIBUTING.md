@@ -1,7 +1,9 @@
 # Contributing to AnchorLoop
 
-AnchorLoop 0.1 is a public-alpha release candidate. Small, testable changes that strengthen its local,
-agent-neutral workflow core are preferred over broad integrations.
+`anchorloop@0.1.0` is the published public-alpha baseline; current `main` is
+the unreleased `0.2.0` release candidate. Small, testable changes that
+strengthen its local, agent-neutral workflow core are preferred over broad
+integrations.
 
 ## Local development
 
@@ -32,8 +34,10 @@ in the normal suite; do not replace them with Linux-only mocks.
 
 ## npm launcher
 
-The optional `npx anchorloop install` route requires Node.js 18 or newer and
-must remain a thin launcher around the Python core. When changing its package,
+The optional exact-version npm route (for example,
+`npx --yes anchorloop@0.2.0 install` after publication) requires Node.js 18 or
+newer and must remain a thin launcher around the Python core. During candidate
+development exercise the checkout directly. When changing its package,
 launcher, or skill templates:
 
 ~~~powershell
@@ -62,7 +66,7 @@ protected `npm-release` GitHub environment. Keep the CI jobs as required checks
 on `main`. Do not add a long-lived npm token to the workflow.
 
 Create a signed annotated tag whose name exactly matches the canonical version
-(for example, `git tag -s v0.1.0 -m "AnchorLoop v0.1.0"`) and ensure the
+(for example, `git tag -s v0.2.0 -m "AnchorLoop 0.2.0"`) and ensure the
 signing key is associated with the maintainer's GitHub account before pushing
 the tag. The release workflow reruns the full Python, wheel, npm, OS, and Node
 18/20/22 matrix for the tagged commit; checks the GitHub-verified tag
@@ -75,17 +79,14 @@ Hosted runner images and Python build tooling still receive upstream updates;
 do not claim binary reproducibility without a separately pinned toolchain and
 runner-image policy.
 
-The package name must exist before npm trusted publishing can be configured.
-For the first release only, reserve `anchorloop` with a lower, fully
-version-consistent bootstrap release such as `0.0.0` from a clean disposable
-checkout (or switch every manifest, runner, and document to an owned scope).
-Do **not** manually publish the intended alpha version: npm versions are
-immutable, so that would prevent the signed-tag workflow from publishing the
-same version with OIDC provenance. After the reservation, configure the
-repository/workflow/environment trusted publisher and publish `0.1.0` through
-the signed tag. Deprecate the bootstrap version after the registry smoke passes.
-Do not weaken `release.yml` or add a long-lived token merely to hide a missing
-bootstrap step.
+`anchorloop@0.1.0` is the published production baseline. npm versions are
+immutable: before creating `v0.2.0`, verify that `anchorloop@0.2.0` does not
+exist. The release workflow repeats that check, refuses an existing exact
+version, and verifies the published `gitHead` after the registry smoke. Never
+publish `0.2.0` manually, move a published tag, or attempt to overwrite a
+failed release. Fix pre-publish failures in a new commit; for a post-publish
+defect, deprecate the affected version and release `0.2.1`. Do not weaken
+`release.yml` or add a long-lived token.
 
 ## Pull requests
 

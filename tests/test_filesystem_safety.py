@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from anchorloop.cli import main
 from anchorloop.project import AnchorError
@@ -190,6 +191,62 @@ class FilesystemSafetyTests(unittest.TestCase):
                     2,
                 )
                 self.assertFalse((outside / "skills" / "anchorloop").exists())
+
+    def test_global_skill_install_rejects_symlinked_managed_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for platform, managed_parts in (
+                ("agents", (".agents",)),
+                ("codex", (".codex",)),
+                ("cursor", (".cursor",)),
+                ("gemini", (".gemini",)),
+                ("claude", (".claude",)),
+                ("opencode", (".config", "opencode")),
+            ):
+                project = base / f"project-global-{platform}"
+                home = base / f"home-{platform}"
+                outside = base / f"outside-global-{platform}"
+                project.mkdir()
+                home.mkdir()
+                outside.mkdir()
+                managed = home.joinpath(*managed_parts)
+                managed.parent.mkdir(parents=True, exist_ok=True)
+                self._symlink_or_skip(outside, managed, directory=True)
+
+                with mock.patch("anchorloop.skill_install.Path.home", return_value=home):
+                    self.assertEqual(
+                        main(
+                            [
+                                "install",
+                                "--global",
+                                "--platform",
+                                platform,
+                                "--apply",
+                                "--force",
+                                "--path",
+                                str(project),
+                            ]
+                        ),
+                        2,
+                    )
+                self.assertFalse((outside / "skills" / "anchorloop").exists())
+
+    def test_windows_reparse_attribute_is_rejected_deterministically(self) -> None:
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        metadata = mock.Mock(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_file_attributes=reparse_flag,
+        )
+        with (
+            mock.patch.object(
+                stat,
+                "FILE_ATTRIBUTE_REPARSE_POINT",
+                reparse_flag,
+                create=True,
+            ),
+            self.assertRaisesRegex(AnchorError, "symlink or reparse-point"),
+        ):
+            SafeProjectFS._reject_link(Path("managed"), metadata)
 
     def test_installer_temp_and_marker_symlinks_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

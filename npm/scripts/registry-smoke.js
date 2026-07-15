@@ -115,6 +115,7 @@ function runSmoke({ packageName, version }) {
     assert.match(fs.readFileSync(skillPath, "utf8"), new RegExp(`npx --yes ${packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}@${version} status`));
 
     anchor("add", "--apply");
+    anchor("doctor", "--strict");
     for (const ignored of [
       "cache/example",
       ".cache/example",
@@ -186,12 +187,19 @@ function runSmoke({ packageName, version }) {
       "--notes", "No post-completion issue in the registry smoke window.",
     );
     anchor("report", "--format", "json");
+    anchor("doctor", "--strict");
     anchor("uninstall");
+    anchor("doctor", "--strict");
 
     assert.equal(fs.existsSync(skillPath), false, "uninstall left the installed skill behind");
     assert.equal(fs.existsSync(path.join(project, ".anchor")), true, "workflow state disappeared during uninstall");
     for (const forbidden of [".agents", "node_modules", "cache", ".cache", ".npm", ".npm-cache", "__pycache__"]) {
       assert.equal(fs.existsSync(path.join(project, forbidden)), false, `${forbidden} leaked into the project`);
+    }
+    for (const relative of [".anchor/transactions/pending", ".anchor/outbox"]) {
+      const directory = path.join(project, ...relative.split("/"));
+      assert.equal(fs.existsSync(directory), true, `${relative} is missing after the lifecycle`);
+      assert.deepEqual(fs.readdirSync(directory), [], `${relative} retained recovery residue`);
     }
     console.log(`${packageSpec}: clean registry lifecycle passed.`);
   } finally {

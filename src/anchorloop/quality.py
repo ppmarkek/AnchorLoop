@@ -17,6 +17,10 @@ _SECRET_ASSIGNMENT = re.compile(
 )
 
 
+class GitInspectionError(RuntimeError):
+    """A required Git working-tree query could not be completed."""
+
+
 def run_precommit(root: Path, *, active_categories: set[str]) -> dict[str, Any]:
     """Run small, local checks that are safe before project-specific tools exist."""
 
@@ -409,24 +413,49 @@ def _source_files(root: Path) -> list[Path]:
     return [path for path in root.rglob("*") if _is_supported_source_file(root, path)]
 
 
-def _git_changed_paths(root: Path) -> list[Path]:
+def git_changed_path_names(root: Path, *, strict: bool = False) -> list[str]:
+    """Return normalized changed paths, including deleted files."""
+
+    git_root = _git_bytes(root, "rev-parse", "--show-toplevel")
+    if git_root is None:
+        if strict:
+            raise GitInspectionError(
+                "Required Git inspection failed: git rev-parse --show-toplevel"
+            )
+        return []
     commands = (
-        ("diff", "--name-only", "HEAD"),
-        ("diff", "--cached", "--name-only"),
-        ("ls-files", "--others", "--exclude-standard"),
+        ("diff", "--relative", "--no-renames", "--name-only", "-z", "--"),
+        ("diff", "--cached", "--relative", "--no-renames", "--name-only", "-z", "--"),
+        ("ls-files", "--others", "--exclude-standard", "-z", "--"),
     )
-    paths: dict[Path, None] = {}
+    paths: set[str] = set()
     for arguments in commands:
-        process = subprocess.run(
-            ["git", *arguments], cwd=root, capture_output=True, text=True, check=False
-        )
-        if process.returncode != 0:
+        output = _git_bytes(root, *arguments)
+        if output is None:
+            if strict:
+                command = "git " + " ".join(arguments)
+                raise GitInspectionError(f"Required Git inspection failed: {command}")
             continue
-        for relative_name in process.stdout.splitlines():
-            path = root / relative_name
-            if _is_regular_file(path):
-                paths[path] = None
-    return list(paths)
+        for encoded_name in output.split(b"\0"):
+            if not encoded_name:
+                continue
+            name = encoded_name.decode(
+                "utf-8", errors="surrogateescape"
+            ).replace("\\", "/")
+            while name.startswith("./"):
+                name = name[2:]
+            if not name or name == ".anchor" or name.startswith(".anchor/"):
+                continue
+            paths.add(name)
+    return sorted(paths)
+
+
+def _git_changed_paths(root: Path) -> list[Path]:
+    paths = [
+        root / relative_name
+        for relative_name in git_changed_path_names(root)
+    ]
+    return [path for path in paths if _is_regular_file(path)]
 
 
 def _is_supported_source_file(root: Path, path: Path) -> bool:

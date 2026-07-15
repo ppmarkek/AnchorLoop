@@ -8,13 +8,15 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 ## Status
 
-AnchorLoop 0.1 is a release candidate for its first public alpha. The local
-Python CLI, installable agent-neutral skill adapter, transaction/recovery
-boundary, human-ownership modes, and npm launcher are implemented and locally
-packaged. The public npm name still requires a one-time bootstrap publish, so
-the one-command registry install is not production-available until a lower
-bootstrap version reserves the name and the tagged `0.1.0` release plus
-post-publish smoke test succeed.
+**Published production:** `anchorloop@0.1.0`
+
+**Unreleased main:** `0.2.0` release candidate
+
+The published `0.1.0` package remains the production version. Current `main`
+contains the unreleased recovery, validation, ownership, release-safety, and
+multi-agent installer work planned for `0.2.0`. Until the signed `v0.2.0` tag
+passes the complete release workflow, do not describe those additions as
+available from npm `latest`.
 
 ## Core idea
 
@@ -75,9 +77,12 @@ The source of truth is the local `anchor` CLI and the project’s `.anchor/` dir
 
 Every host gets the same task states and approval rules. Native integrations must remain thin adapters; they never own the workflow state.
 
-## What works now
+## What is implemented in the unreleased 0.2.0 candidate
 
-- `anchor install` and `anchor uninstall` preview then manage a packaged, project- or user-scoped skill adapter for generic Agent Skills or explicit Codex locations. They never modify the `.anchor/` workflow state.
+- `anchor install` and `anchor uninstall` preview then manage a packaged,
+  project- or user-scoped skill adapter for Agent Skills, Codex, Cursor,
+  Gemini CLI, Claude Code, and OpenCode destinations. They never modify the
+  `.anchor/` workflow state.
 - Anchor-managed state and skill destinations reject symlink and Windows reparse-point components. Writes use unique temporary files plus atomic replacement; `--force` never bypasses that boundary.
 - Project mutations are serialized by a cross-platform lock. State and ordered
   events commit through a durable redo journal, interrupted commands recover
@@ -90,6 +95,9 @@ Every host gets the same task states and approval rules. Native integrations mus
   transaction or torn final event-log entry.
 - Failed verification is preserved and can explicitly return to implementation or planning with `anchor revise`; it no longer strands the active task.
 - The quality gate records a deterministic workspace fingerprint. Verification and close are blocked when the checked code changes afterward.
+- Before `review_ready` and again before `precommit`, AnchorLoop evaluates the
+  actual Git diff. CAREFUL paths block a lower-mode task until the engineer
+  revises the plan or records a path-specific reviewed override.
 - `anchor init` and `anchor add` preview project setup and require `--apply` before creating files.
 - Setup creates portable `.anchor/` state, baseline **proposed** rules, Graphify integration metadata, a portable agent protocol, and a generated next-action file.
 - The task flow enforces `start → brief → plan → approve → implement → review → precommit → verify → close`.
@@ -100,17 +108,30 @@ Every host gets the same task states and approval rules. Native integrations mus
 
 Graphify installation, full language-specific security tooling, project-specific test commands, external research, skill discovery, and native host adapters are planned next. AnchorLoop never installs them silently.
 
-## Install as a skill — guided setup
+## Install the published 0.1.0 package
 
 Requirements: Node.js 18 or newer and Python 3.11 or newer.
 
-From any project, run:
+Use the exact published production version:
 
 ~~~sh
-npx anchorloop install
+npx --yes anchorloop@0.1.0 install --project --platform codex --apply
 ~~~
 
-In a terminal, a compact setup wizard asks where AnchorLoop should live:
+Do not use an unversioned `npx anchorloop install` command to test the features
+documented below: npm `latest` still resolves to `0.1.0` until the `0.2.0`
+release completes.
+
+## Unreleased 0.2.0 guided setup
+
+From a development checkout, install the current Python CLI in editable mode:
+
+~~~sh
+python -m pip install -e .
+anchor install --interactive
+~~~
+
+The compact setup wizard asks where AnchorLoop should live:
 
 - **This project** installs the portable Agent Skills standard at
   `.agents/skills/anchorloop/` for compatible agents in the repository.
@@ -124,13 +145,19 @@ It installs only the thin skill adapter with a pinned
 `npx --yes anchorloop@<version>` runner. It never creates `.anchor/`, modifies
 application code, adds `node_modules`, or stores a cache in the project.
 
-For scripts and CI, use explicit flags instead of the wizard:
+The six destination layouts are covered by filesystem tests. Native host
+discovery remains **Experimental** until each real host is opened and confirms
+that it discovers and follows the installed skill; file placement alone is not
+a production host-discovery claim.
+
+For local dogfooding, scripts, and CI, use explicit flags instead of the
+wizard. Do not commit the generated installation:
 
 ~~~sh
-npx anchorloop install --project --platform codex
-npx anchorloop install --global --platform gemini
-npx anchorloop install --global --all
-npx anchorloop install --global --all --preview
+anchor install --project --platform codex --apply
+anchor install --global --platform gemini --apply
+anchor install --global --all --apply
+anchor install --global --all
 ~~~
 
 npm may keep its own user-level download cache; AnchorLoop never writes an npm
@@ -155,6 +182,16 @@ python -m pip install "git+https://github.com/ppmarkek/AnchorLoop.git"
 This is a Git installation path, not a PyPI release. Afterward, run `anchor
 install ...` to add the optional portable skill adapter to a project or user
 skill directory.
+
+## Migrating from 0.1.0 to 0.2.0
+
+Do not delete `.anchor/`: it is the project workflow record. The `0.2.0`
+migration refreshes managed protocol/support files and skill assets while
+preserving task, rule, approval, and audit records. If an installed skill was
+edited locally, review and preserve that diff before using `--force`.
+
+See the [0.1.0 to 0.2.0 migration guide](docs/MIGRATION_0.2.md) for the current
+release-candidate procedure and the exact commands to use after publication.
 
 ## Development from a checkout
 
@@ -357,6 +394,8 @@ index separately during that migration.
 - [Decision map](docs/ANCHOR_DECISION_MAP.md)
 - [Domain glossary](CONTEXT.md)
 - [Portable skill adapter](docs/PORTABLE_SKILL.md)
+- [Migration from 0.1.0 to 0.2.0](docs/MIGRATION_0.2.md)
+- [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 

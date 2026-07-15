@@ -34,7 +34,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version: "22"
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
@@ -45,6 +47,9 @@ jobs:
           set -euo pipefail
           npm install --global npm@11.18.0
           test "$(npm --version)" = "11.18.0"
+
+      - name: Install the locked release dependencies
+        run: npm ci --ignore-scripts
 
       - name: Verify canonical version and exact release tag
         id: release
@@ -58,6 +63,19 @@ jobs:
           package_name="$(node -p "require('./package.json').name")"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'package_name=%s\n' "$package_name" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse an already published version
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if npm view "${PACKAGE_NAME}@${VERSION}" version --json >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} is already published and cannot be overwritten." >&2
+            exit 1
+          fi
 
       - name: Require a GitHub-verified signed annotated tag
         shell: bash
@@ -91,15 +109,15 @@ jobs:
             exit 1
           }
 
-      - name: Require the npm bootstrap reservation
+      - name: Require the existing npm package identity
         shell: bash
         env:
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
         run: |
           set -euo pipefail
           if ! published_name="$(npm view "${PACKAGE_NAME}" name --json 2>/dev/null)"; then
-            echo "${PACKAGE_NAME} does not exist in npm yet." >&2
-            echo "Reserve it first with a lower, version-consistent bootstrap release; then configure the trusted publisher." >&2
+            echo "Could not verify the existing npm package ${PACKAGE_NAME}." >&2
+            echo "Restore registry access and confirm the published 0.1.0 baseline before releasing." >&2
             exit 1
           fi
           test "$(jq -r '.' <<< "$published_name")" = "$PACKAGE_NAME" || {
@@ -131,4 +149,20 @@ jobs:
           node npm/scripts/registry-smoke.js
           --package "${{ steps.release.outputs.package_name }}"
           --version "${{ steps.release.outputs.version }}"
+
+      - name: Verify published commit identity
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          published_head="$(npm view "${PACKAGE_NAME}@${VERSION}" gitHead)"
+          expected_head="$(git rev-parse HEAD)"
+
+          test "$published_head" = "$expected_head" || {
+            echo "Published gitHead ${published_head} does not match ${expected_head}." >&2
+            exit 1
+          }
 

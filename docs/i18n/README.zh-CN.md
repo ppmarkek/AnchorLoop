@@ -2,6 +2,11 @@
 
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
+> - **已发布的 production：** `anchorloop@0.1.0`
+> - **尚未发布的 main：** `0.2.0` release candidate
+> - 在 `0.2.0` 发布前，production 请使用
+>   `npx --yes anchorloop@0.1.0 ...`。[迁移指南](../MIGRATION_0.2.md)。
+
 AnchorLoop 是面向 AI 编程代理的本地 workflow。工程师始终掌控任务、规则、项目结构和最终验收。
 
 核心原则：AI 可以编写代码，但不能自行批准计划、启用新规则、选择技能或关闭任务。

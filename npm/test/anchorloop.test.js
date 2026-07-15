@@ -170,3 +170,73 @@ test("the package manifest allowlists the runner and its Python skill assets", (
     /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-evidence-integrity\.svg/,
   );
 });
+
+test("the actual npm tarball contains only release runtime and documentation files", { timeout: 60_000 }, () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anchorloop-pack-"));
+  const npmCache = path.join(temporaryRoot, "npm-cache");
+  try {
+    const npmArguments = ["pack", "--pack-destination", temporaryRoot, "--json"];
+    const npmExecutable = process.env.npm_execpath;
+    const pack = npmExecutable
+      ? spawnSync(process.execPath, [npmExecutable, ...npmArguments], {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          shell: false,
+          windowsHide: true,
+          env: { ...process.env, npm_config_cache: npmCache },
+        })
+      : spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", npmArguments, {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          shell: process.platform === "win32",
+          windowsHide: true,
+          env: { ...process.env, npm_config_cache: npmCache },
+        });
+    assert.equal(pack.status, 0, `${pack.stdout}\n${pack.stderr}`);
+    const jsonStart = pack.stdout.indexOf("[");
+    const jsonEnd = pack.stdout.lastIndexOf("]");
+    assert(jsonStart >= 0 && jsonEnd > jsonStart, `npm pack did not return JSON:\n${pack.stdout}`);
+    const metadata = JSON.parse(pack.stdout.slice(jsonStart, jsonEnd + 1));
+    assert.equal(metadata.length, 1, "npm pack must create exactly one archive");
+    const archives = fs.readdirSync(temporaryRoot).filter((name) => name.endsWith(".tgz"));
+    assert.deepEqual(archives, [metadata[0].filename]);
+
+    const archive = path.join(temporaryRoot, metadata[0].filename);
+    const listing = spawnSync("tar", ["-tzf", archive], {
+      cwd: temporaryRoot,
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true,
+    });
+    assert.equal(listing.status, 0, listing.stderr);
+    const entries = listing.stdout.split(/\r?\n/).filter(Boolean);
+    const forbidden = [
+      /^package\/node_modules\//,
+      /^package\/\.codex\//,
+      /^package\/\.anchor\//,
+      /(?:^|\/)__pycache__\//,
+      /\.pyc$/,
+      /(?:^|\/)[^/]+\.egg-info\//,
+      /^package\/(?:cache|\.npm|\.npm-cache)\//,
+      /(?:^|\/)(?:tests?|fixtures?)\//,
+    ];
+    for (const entry of entries) {
+      assert.equal(
+        forbidden.some((pattern) => pattern.test(entry)),
+        false,
+        `forbidden release archive entry: ${entry}`,
+      );
+    }
+    for (const required of [
+      "package/package.json",
+      "package/CHANGELOG.md",
+      "package/docs/MIGRATION_0.2.md",
+      "package/src/anchorloop/skills/anchorloop/SKILL.md",
+      "package/src/anchorloop/skills/anchorloop/references/workflow.md",
+    ]) {
+      assert(entries.includes(required), `missing release archive entry: ${required}`);
+    }
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});

@@ -14,7 +14,12 @@ from typing import Any, Callable, Iterator, TypeVar
 from uuid import uuid4
 
 from .command import display_command
-from .quality import run_precommit, workspace_fingerprint
+from .quality import (
+    GitInspectionError,
+    git_changed_path_names,
+    run_precommit,
+    workspace_fingerprint,
+)
 from .project_lock import ProjectLock
 from .safe_fs import AnchorError, SafeProjectFS
 from .transaction import ProjectTransaction, TransactionManager
@@ -163,6 +168,8 @@ _CAREFUL_PATH_SIGNALS: dict[str, tuple[str, ...]] = {
         "/pyproject.toml",
     ),
 }
+
+_ACTUAL_DIFF_REVISION_REASON = "Actual diff introduced CAREFUL risk paths."
 
 _ReturnT = TypeVar("_ReturnT")
 
@@ -1227,6 +1234,8 @@ class AnchorProject:
             raise AnchorError(f"Cannot run '{action}' while task is '{state}'.{detail}")
         if action in {"implement", "review", "precommit", "close"}:
             self._ensure_approval_matches_task(task)
+        if action == "review":
+            self._ensure_actual_diff_mode(task)
         if action == "close":
             verification = task.get("verification", {})
             if verification.get("result") not in {"pass", "partial", "not-applicable"}:
@@ -1292,6 +1301,7 @@ class AnchorProject:
         if task["state"] != "review_ready":
             raise AnchorError(f"Cannot run 'precommit' while task is '{task['state']}'.")
         self._ensure_approval_matches_task(task)
+        self._ensure_actual_diff_mode(task)
         ruleset = task.get("ruleset") or {"rules": {}}
         quality = run_precommit(self.root, active_categories=set(ruleset["rules"]))
         task.setdefault("quality", []).append(quality)
@@ -1847,6 +1857,97 @@ class AnchorProject:
         if task_text.casefold() != "general":
             return "STANDARD", f"task type {task_type!r} changes product or code behavior"
         return "STANDARD", "unknown task risk defaults to engineer-owned STANDARD planning"
+
+    def _ensure_actual_diff_mode(self, task: dict[str, Any]) -> None:
+        """Block a low-ownership task when its material diff is CAREFUL."""
+
+        if task.get("mode") == "CAREFUL":
+            return
+        risk_paths = self._actual_diff_risk_paths()
+        if not risk_paths:
+            return
+
+        plan = task.get("plan")
+        recommendation = (
+            plan.get("mode_recommendation")
+            if isinstance(plan, dict)
+            else None
+        )
+        override = (
+            recommendation.get("override_reason")
+            if isinstance(recommendation, dict)
+            else None
+        )
+        if (
+            self._actual_diff_override_covers(override, risk_paths)
+            and self._has_actual_diff_revision(task)
+        ):
+            return
+
+        locations = ", ".join(risk_paths)
+        revise = display_command(
+            'revise --target plan --reason '
+            f'"{_ACTUAL_DIFF_REVISION_REASON}"'
+        )
+        raise AnchorError(
+            f"Actual diff introduced CAREFUL risk paths: {locations}. "
+            f"Task mode {task.get('mode')} cannot continue. Run: {revise}. "
+            "Record and approve a new plan. Keeping a lower mode requires an "
+            "engineer-owned --mode-override-reason that explicitly lists "
+            "every detected path."
+        )
+
+    def _actual_diff_risk_paths(self) -> list[str]:
+        risky: list[str] = []
+        try:
+            changed_paths = git_changed_path_names(self.root, strict=True)
+        except GitInspectionError as error:
+            raise AnchorError(
+                "Cannot evaluate the actual Git diff safely; review and precommit are blocked. "
+                "Restore Git access and retry."
+            ) from error
+        for path in changed_paths:
+            path_text = "/" + path.casefold().strip("/")
+            if any(
+                marker.casefold() in path_text
+                for markers in _CAREFUL_PATH_SIGNALS.values()
+                for marker in markers
+            ):
+                risky.append(path)
+        return risky
+
+    @staticmethod
+    def _has_actual_diff_revision(task: dict[str, Any]) -> bool:
+        revisions = task.get("revisions")
+        if not isinstance(revisions, list):
+            return False
+        return any(
+            isinstance(revision, dict)
+            and revision.get("target") == "plan"
+            and revision.get("reason") == _ACTUAL_DIFF_REVISION_REASON
+            and revision.get("previous_state")
+            in {"implementing", "review_ready", "quality_checked"}
+            for revision in revisions
+        )
+
+    @staticmethod
+    def _actual_diff_override_covers(
+        override: object,
+        risk_paths: list[str],
+    ) -> bool:
+        if not isinstance(override, str) or not override.strip():
+            return False
+        normalized = override.replace("\\", "/").casefold()
+        path_character = r"[\w./-]"
+        return all(
+            re.search(
+                rf"(?<!{path_character}){re.escape(path.casefold())}"
+                rf"(?!{path_character})",
+                normalized,
+            )
+            is not None
+            for path in risk_paths
+        )
 
     @contextmanager
     def _mutation(self, command: str, *, allow_unconfigured: bool) -> Iterator[None]:
