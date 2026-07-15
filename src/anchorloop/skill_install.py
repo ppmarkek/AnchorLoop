@@ -75,6 +75,9 @@ SKILL_RUNTIME_ANCHOR = "anchor"
 SKILL_RUNTIME_NPX = "npx"
 SUPPORTED_SKILL_RUNTIMES = (SKILL_RUNTIME_ANCHOR, SKILL_RUNTIME_NPX)
 _MARKER_NAME = ".anchorloop-skill.json"
+_SKILL_MARKER_SCHEMA = 2
+_SKILL_OWNED_PATHS = frozenset({"SKILL.md", "references/workflow.md"})
+_SKILL_SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _INSTALL_JOURNAL_NAME = "skill-install-journal.json"
 _INSTALL_JOURNAL_SCHEMA = 2
 _NPX_PACKAGE_PATTERN = re.compile(
@@ -308,9 +311,13 @@ class SkillInstaller:
         previous_files: dict[str, str | None] = {}
         if filesystem.exists(marker_path):
             previous_marker = self._read_marker(filesystem, marker_path)
-            if previous_marker.get("platform") != platform:
-                raise AnchorError(f"Skill marker at {destination} is for a different platform.")
-            previous_files = self._marker_files(previous_marker, marker_path)
+            self._validate_marker_identity(
+                previous_marker,
+                marker_path,
+                platform=platform,
+                project_scoped=project_scoped,
+            )
+            previous_files = self._marker_files(previous_marker, marker_path, force=force)
             self._require_unmodified_assets(
                 filesystem,
                 destination,
@@ -326,7 +333,7 @@ class SkillInstaller:
         }
         installed_version = self._installed_version()
         marker = {
-            "schema_version": 2,
+            "schema_version": _SKILL_MARKER_SCHEMA,
             "skill": SKILL_NAME,
             "platform": platform,
             "scope": "project" if project_scoped else "user-global",
@@ -391,11 +398,13 @@ class SkillInstaller:
             raise AnchorError(f"No AnchorLoop skill installation is recorded at {destination}.")
 
         marker = self._read_marker(filesystem, marker_path)
-        recorded_platform = marker.get("platform")
-        if recorded_platform != platform:
-            raise AnchorError(f"Skill marker at {destination} is for platform '{recorded_platform}', not '{platform}'.")
-
-        paths = self._marker_files(marker, marker_path)
+        self._validate_marker_identity(
+            marker,
+            marker_path,
+            platform=platform,
+            project_scoped=project_scoped,
+        )
+        paths = self._marker_files(marker, marker_path, force=force)
         self._require_unmodified_assets(filesystem, destination, paths, force=force, operation="uninstall")
         journal = self._uninstall_journal(
             filesystem=filesystem,
@@ -435,6 +444,12 @@ class SkillInstaller:
                 "recovery_pending": False,
             }
         marker = self._read_marker(filesystem, marker_path)
+        self._validate_marker_identity(
+            marker,
+            marker_path,
+            platform=platform,
+            project_scoped=project_scoped,
+        )
         integrity = "ok"
         bundle_current = False
         try:
@@ -765,6 +780,15 @@ class SkillInstaller:
             delete_names.add(name)
             deletes.append((relative_path, before))
 
+        if not delete_names.issubset(_SKILL_OWNED_PATHS):
+            raise AnchorError("Skill recovery journal contains a delete outside owned assets.")
+        if action == "install" and write_names != _SKILL_OWNED_PATHS:
+            raise AnchorError("Skill install recovery journal does not contain the canonical asset bundle.")
+        if action == "uninstall" and write_names:
+            raise AnchorError("Skill uninstall recovery journal contains writes.")
+        if action == "uninstall" and delete_names != _SKILL_OWNED_PATHS:
+            raise AnchorError("Skill uninstall recovery journal does not contain the canonical asset bundle.")
+
         raw_marker = journal.get("marker")
         if action == "install":
             marker_path, marker_content, marker_before = self._decode_journal_file(
@@ -780,6 +804,12 @@ class SkillInstaller:
                 raise AnchorError("Skill recovery journal marker content is invalid.") from error
             if not isinstance(marker, dict) or marker.get("skill") != SKILL_NAME:
                 raise AnchorError("Skill recovery journal marker content is invalid.")
+            self._validate_marker_identity(
+                marker,
+                destination / _MARKER_NAME,
+                platform=str(journal["platform"]),
+                project_scoped=bool(journal["project_scoped"]),
+            )
             expected_scope = "project" if journal["project_scoped"] else "user-global"
             if (
                 marker.get("platform") != journal["platform"]
@@ -796,8 +826,8 @@ class SkillInstaller:
             if marker_files != expected_files:
                 raise AnchorError("Skill recovery journal marker does not match its writes.")
         else:
-            if writes or not isinstance(raw_marker, dict):
-                raise AnchorError("Skill uninstall recovery journal contains writes.")
+            if not isinstance(raw_marker, dict):
+                raise AnchorError("Skill uninstall recovery journal marker is invalid.")
             marker_name = raw_marker.get("path")
             if not isinstance(marker_name, str):
                 raise AnchorError("Skill recovery journal marker path is invalid.")
@@ -1083,7 +1113,37 @@ class SkillInstaller:
         return data
 
     @staticmethod
-    def _marker_files(marker: dict[str, Any], marker_path: Path) -> dict[str, str | None]:
+    def _validate_marker_identity(
+        marker: dict[str, Any],
+        marker_path: Path,
+        *,
+        platform: str,
+        project_scoped: bool,
+    ) -> None:
+        expected_scope = "project" if project_scoped else "user-global"
+        if marker.get("schema_version") != _SKILL_MARKER_SCHEMA:
+            raise AnchorError(f"AnchorLoop skill marker at {marker_path} has an unsupported schema.")
+        if marker.get("platform") != platform or marker.get("scope") != expected_scope:
+            raise AnchorError(f"AnchorLoop skill marker at {marker_path} is for a different destination.")
+        version = marker.get("version")
+        runtime = marker.get("runtime", SKILL_RUNTIME_ANCHOR)
+        npx_package = marker.get("npx_package")
+        if (
+            not isinstance(version, str)
+            or not version.strip()
+            or not isinstance(runtime, str)
+            or (npx_package is not None and not isinstance(npx_package, str))
+        ):
+            raise AnchorError(f"AnchorLoop skill marker at {marker_path} has invalid metadata.")
+        SkillInstaller._validate_runtime(runtime, npx_package)
+
+    @staticmethod
+    def _marker_files(
+        marker: dict[str, Any],
+        marker_path: Path,
+        *,
+        force: bool = False,
+    ) -> dict[str, str | None]:
         paths = marker.get("files")
         if not isinstance(paths, list):
             raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
@@ -1091,15 +1151,51 @@ class SkillInstaller:
         result: dict[str, str | None] = {}
         for entry in paths:
             if isinstance(entry, str):
-                result[entry] = None
-                continue
-            if not isinstance(entry, dict):
+                path = entry
+                digest: str | None = None
+                if not force:
+                    raise AnchorError(
+                        f"AnchorLoop skill marker at {marker_path} has legacy entries; rerun with --force."
+                    )
+            elif isinstance(entry, dict):
+                path = entry.get("path")
+                digest = entry.get("sha256")
+                if not isinstance(path, str) or not isinstance(digest, str):
+                    raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
+                if _SKILL_SHA256_PATTERN.fullmatch(digest) is None:
+                    raise AnchorError(f"AnchorLoop skill marker at {marker_path} has an invalid digest.")
+            else:
                 raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
-            path = entry.get("path")
-            digest = entry.get("sha256")
-            if not isinstance(path, str) or not isinstance(digest, str):
+
+            relative = Path(path)
+            if (
+                not path
+                or "\\" in path
+                or relative.is_absolute()
+                or relative.drive
+                or relative.root
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or relative.as_posix() != path
+            ):
                 raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
+            if path in result:
+                raise AnchorError(f"AnchorLoop skill marker at {marker_path} contains duplicate paths.")
             result[path] = digest
+
+        unknown = sorted(set(result) - _SKILL_OWNED_PATHS)
+        missing = sorted(_SKILL_OWNED_PATHS - set(result))
+        if not force and (unknown or missing):
+            details: list[str] = []
+            if unknown:
+                details.append(f"unknown owned paths: {', '.join(unknown)}")
+            if missing:
+                details.append(f"missing owned paths: {', '.join(missing)}")
+            raise AnchorError(
+                f"AnchorLoop skill marker at {marker_path} does not match the canonical bundle "
+                f"({'; '.join(details)})."
+            )
+        if force:
+            return {path: result.get(path) for path in sorted(_SKILL_OWNED_PATHS)}
         return result
 
     def _require_unmodified_assets(

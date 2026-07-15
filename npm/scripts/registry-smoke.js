@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -9,6 +10,27 @@ const { spawnSync } = require("node:child_process");
 const { assertPackageName, assertVersionConsistency } = require("./version.js");
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
+
+const GLOBAL_PLATFORM_PARTS = Object.freeze({
+  agents: [".agents"],
+  codex: [".codex"],
+  cursor: [".cursor"],
+  gemini: [".gemini"],
+  claude: [".claude"],
+  opencode: [".config", "opencode"],
+});
+
+function buildGlobalPlatformPlan(workspace) {
+  return Object.entries(GLOBAL_PLATFORM_PARTS).map(([platform, destinationParts]) => {
+    const home = path.join(workspace, `home-${platform}`);
+    return {
+      platform,
+      home,
+      project: path.join(workspace, `project-${platform}`),
+      destination: path.join(home, ...destinationParts, "skills", "anchorloop"),
+    };
+  });
+}
 
 function usage() {
   console.log(`Usage: node npm/scripts/registry-smoke.js [--package <name>] [--version <version>]
@@ -82,6 +104,139 @@ function waitForRegistry(npm, packageSpec, environment) {
     }
   }
   throw new Error(`${packageSpec} did not become readable from the npm registry within two minutes.`);
+}
+
+function listFiles(root) {
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolute);
+      } else {
+        files.push(path.relative(root, absolute).split(path.sep).join("/"));
+      }
+    }
+  };
+  visit(root);
+  return files.sort();
+}
+
+function fileDigest(file) {
+  return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")}`;
+}
+
+function assertNoProjectResidue(project, platform) {
+  for (const forbidden of [
+    ".anchor",
+    ".agents",
+    ".codex",
+    ".cursor",
+    ".gemini",
+    ".claude",
+    ".opencode",
+    "node_modules",
+    "cache",
+    ".cache",
+    ".npm",
+    ".npm-cache",
+    "__pycache__",
+  ]) {
+    assert.equal(
+      fs.existsSync(path.join(project, forbidden)),
+      false,
+      `${platform} global install leaked ${forbidden} into its project`,
+    );
+  }
+}
+
+function assertNoOtherGlobalDestinations(home, selectedPlatform) {
+  for (const [platform, destinationParts] of Object.entries(GLOBAL_PLATFORM_PARTS)) {
+    if (platform === selectedPlatform) {
+      continue;
+    }
+    const hostRoot = path.join(home, ...destinationParts);
+    assert.equal(
+      fs.existsSync(hostRoot),
+      false,
+      `${selectedPlatform} install unexpectedly created the ${platform} host directory`,
+    );
+  }
+}
+
+function runGlobalPlatformMatrix({ packageSpec, workspace, npx, environment }) {
+  const expectedVersion = packageSpec.slice(packageSpec.lastIndexOf("@") + 1);
+  for (const entry of buildGlobalPlatformPlan(workspace)) {
+    fs.mkdirSync(entry.home, { recursive: true });
+    fs.mkdirSync(entry.project, { recursive: true });
+    const platformEnvironment = {
+      ...environment,
+      HOME: entry.home,
+      USERPROFILE: entry.home,
+    };
+    const anchor = (...args) => run(
+      npx,
+      ["--yes", packageSpec, ...args],
+      { cwd: entry.project, env: platformEnvironment },
+    );
+    const installArguments = [
+      "install",
+      "--global",
+      "--platform", entry.platform,
+      "--apply",
+    ];
+
+    anchor(...installArguments);
+    const markerPath = path.join(entry.destination, ".anchorloop-skill.json");
+    const skillPath = path.join(entry.destination, "SKILL.md");
+    const workflowPath = path.join(entry.destination, "references", "workflow.md");
+    assert.deepEqual(
+      listFiles(entry.destination),
+      [".anchorloop-skill.json", "SKILL.md", "references/workflow.md"],
+      `${entry.platform} install created files outside the owned bundle`,
+    );
+
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    assert.equal(marker.skill, "anchorloop");
+    assert.equal(marker.schema_version, 2);
+    assert.equal(marker.platform, entry.platform);
+    assert.equal(marker.scope, "user-global");
+    assert.equal(marker.version, expectedVersion);
+    assert.equal(marker.runtime, "npx");
+    assert.equal(marker.npx_package, packageSpec);
+    assert.deepEqual(
+      marker.files,
+      [
+        { path: "SKILL.md", sha256: fileDigest(skillPath) },
+        { path: "references/workflow.md", sha256: fileDigest(workflowPath) },
+      ],
+      `${entry.platform} marker does not describe the exact owned bundle`,
+    );
+    const escapedPackageSpec = packageSpec.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(fs.readFileSync(skillPath, "utf8"), new RegExp(`npx --yes ${escapedPackageSpec} status`));
+    assert.match(fs.readFileSync(workflowPath, "utf8"), new RegExp(`npx --yes ${escapedPackageSpec} add --apply`));
+    assertNoOtherGlobalDestinations(entry.home, entry.platform);
+    assertNoProjectResidue(entry.project, entry.platform);
+
+    const userFile = path.join(entry.destination, "user-note.txt");
+    fs.writeFileSync(userFile, "preserve me\n", "utf8");
+    anchor(...installArguments);
+    assert.equal(fs.readFileSync(userFile, "utf8"), "preserve me\n");
+
+    anchor(
+      "uninstall",
+      "--global",
+      "--platform", entry.platform,
+      "--apply",
+    );
+    assert.equal(fs.existsSync(skillPath), false, `${entry.platform} uninstall retained SKILL.md`);
+    assert.equal(fs.existsSync(workflowPath), false, `${entry.platform} uninstall retained workflow.md`);
+    assert.equal(fs.existsSync(markerPath), false, `${entry.platform} uninstall retained its marker`);
+    assert.equal(fs.readFileSync(userFile, "utf8"), "preserve me\n");
+    assertNoOtherGlobalDestinations(entry.home, entry.platform);
+    assertNoProjectResidue(entry.project, entry.platform);
+  }
+  console.log(`${packageSpec}: six-platform global install matrix passed.`);
 }
 
 function runSmoke({ packageName, version }) {
@@ -201,6 +356,7 @@ function runSmoke({ packageName, version }) {
       assert.equal(fs.existsSync(directory), true, `${relative} is missing after the lifecycle`);
       assert.deepEqual(fs.readdirSync(directory), [], `${relative} retained recovery residue`);
     }
+    runGlobalPlatformMatrix({ packageSpec, workspace, npx, environment });
     console.log(`${packageSpec}: clean registry lifecycle passed.`);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -227,6 +383,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildGlobalPlatformPlan,
   parseArguments,
+  runGlobalPlatformMatrix,
   runSmoke,
 };

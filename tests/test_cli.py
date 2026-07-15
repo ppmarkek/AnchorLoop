@@ -12,6 +12,7 @@ from unittest import mock
 
 from anchorloop.cli import main
 from anchorloop.quality import workspace_fingerprint
+from tests.git_fixture import init_git_repository
 
 
 def record_brief(root: Path) -> int:
@@ -37,6 +38,7 @@ def record_brief(root: Path) -> int:
 
 
 def record_plan(root: Path, summary: str) -> int:
+    init_git_repository(root)
     return main(
         [
             "plan",
@@ -1042,8 +1044,13 @@ class AnchorCliTests(unittest.TestCase):
                 }
             )
             marker_path.write_text(json.dumps(marker), encoding="utf-8")
-            self.assertEqual(main(["install", "--project", "--apply", "--path", str(root)]), 0)
-            self.assertFalse(legacy_asset.exists())
+            self.assertEqual(main(["install", "--project", "--apply", "--path", str(root)]), 2)
+            self.assertTrue(legacy_asset.exists())
+            self.assertEqual(
+                main(["install", "--project", "--apply", "--force", "--path", str(root)]),
+                0,
+            )
+            self.assertTrue(legacy_asset.exists())
 
             note = destination / "user-note.txt"
             note.write_text("keep me\n", encoding="utf-8")

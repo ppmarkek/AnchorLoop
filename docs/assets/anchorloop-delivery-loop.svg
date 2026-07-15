@@ -1,118 +1,113 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 620" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title description">
   <title id="title">AnchorLoop delivery loop</title>
-  <desc id="description">A workflow from task through brief, plan, engineer approval, implementation, review, quality evidence, verification, and close. Failed verification moves through an explicit revision back to planning or implementation.</desc>
+  <desc id="description">A numbered workflow from task through brief, plan, engineer approval, implementation, review and precommit, verification, and close. A failed verification remains recorded and returns explicitly to implementation or to planning and approval.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0b1220"/>
-      <stop offset="1" stop-color="#10243a"/>
-    </linearGradient>
-    <linearGradient id="approval" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1d4ed8"/>
-      <stop offset="1" stop-color="#2563eb"/>
-    </linearGradient>
-    <linearGradient id="evidence" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#047857"/>
-      <stop offset="1" stop-color="#059669"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-30%" width="140%" height="170%">
-      <feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#020617" flood-opacity=".35"/>
-    </filter>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7dd3fc"/>
+    <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#7dd3fc"/>
     </marker>
-    <marker id="revision-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/>
+    <marker id="revision-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#fbbf24"/>
     </marker>
     <style>
-      .label { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #f8fafc; }
-      .title { font-family: Inter, Segoe UI, Arial, sans-serif; font-weight: 700; fill: #f8fafc; }
-      .muted { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #bfdbfe; }
-      .node { fill: #15253b; stroke: #335475; stroke-width: 1.5; }
-      .node-title { font-family: Inter, Segoe UI, Arial, sans-serif; font-size: 18px; font-weight: 700; fill: #f8fafc; }
-      .node-detail { font-family: Inter, Segoe UI, Arial, sans-serif; font-size: 13px; fill: #cbd5e1; }
-      .arrow-label { font-family: Inter, Segoe UI, Arial, sans-serif; font-size: 12px; font-weight: 700; fill: #bae6fd; letter-spacing: .04em; }
+      .ui { font-family: Inter, "Segoe UI", Arial, sans-serif; }
+      .heading { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 30px; font-weight: 700; fill: #f8fafc; }
+      .subtitle { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 17px; fill: #b9c8dc; }
+      .card { fill: #111c2f; stroke: #ffffff; stroke-opacity: .11; stroke-width: 1.5; }
+      .card-title { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 18px; font-weight: 700; fill: #f8fafc; }
+      .card-body { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 16px; fill: #cbd5e1; }
+      .step { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 13px; font-weight: 800; fill: #dbeafe; letter-spacing: .04em; }
+      .eyebrow { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 13px; font-weight: 800; letter-spacing: .08em; }
+      .footer { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 14.5px; fill: #9fb0c6; }
+      .flow { fill: none; stroke: #7dd3fc; stroke-width: 2.5; stroke-linecap: round; marker-end: url(#flow-arrow); }
     </style>
   </defs>
 
-  <rect width="1440" height="620" rx="28" fill="url(#background)"/>
-  <text x="64" y="72" class="title" font-size="34">The delivery loop stays engineer-controlled</text>
-  <text x="64" y="106" class="muted" font-size="18">Implementation begins only after an approved brief and plan. Failed verification takes an explicit route back.</text>
+  <rect x=".75" y=".75" width="1198.5" height="718.5" rx="24" fill="#0b1220" stroke="#ffffff" stroke-opacity=".1" stroke-width="1.5"/>
 
-  <g fill="none" stroke="#7dd3fc" stroke-width="3" marker-end="url(#arrow)">
-    <path d="M202 265 H242"/>
-    <path d="M377 265 H417"/>
-    <path d="M552 265 H592"/>
-    <path d="M757 265 H797"/>
-    <path d="M932 265 H972"/>
-    <path d="M1137 265 H1177"/>
-    <path d="M1312 265 H1352"/>
-  </g>
-  <g class="arrow-label">
-    <text x="212" y="234">RECORD</text>
-    <text x="388" y="234">PLAN</text>
-    <text x="565" y="234">APPROVE</text>
-    <text x="764" y="234">BUILD</text>
-    <text x="940" y="234">REVIEW</text>
-    <text x="1141" y="234">VERIFY</text>
+  <text x="48" y="58" class="heading">Delivery stays engineer-controlled</text>
+  <text x="48" y="89" class="subtitle">Implementation starts only after approval. Every later gate records evidence before work can close.</text>
+  <line x1="48" y1="116" x2="1152" y2="116" stroke="#ffffff" stroke-opacity=".1"/>
+
+  <g aria-hidden="true">
+    <path class="flow" d="M288 208H328"/>
+    <path class="flow" d="M576 208H616"/>
+    <path class="flow" d="M864 208H904"/>
+    <path class="flow" d="M1032 272V336"/>
+    <path class="flow" d="M912 408H872"/>
+    <path class="flow" d="M624 408H584"/>
+    <path class="flow" d="M336 408H296"/>
+    <text x="1052" y="311" class="eyebrow" fill="#bae6fd">APPROVED</text>
   </g>
 
-  <g filter="url(#shadow)">
-    <rect x="64" y="200" width="138" height="130" rx="18" class="node"/>
-    <circle cx="96" cy="232" r="14" fill="#38bdf8"/>
-    <text x="120" y="238" class="node-title">Task</text>
-    <text x="88" y="276" class="node-detail">Outcome and scope</text>
-    <text x="88" y="298" class="node-detail">are explicit</text>
+  <g>
+    <rect x="48" y="144" width="240" height="128" rx="16" class="card"/>
+    <rect x="68" y="164" width="36" height="24" rx="12" fill="#16344b"/>
+    <text x="78" y="181" class="step">01</text>
+    <text x="116" y="183" class="card-title">Task</text>
+    <text x="72" y="222" class="card-body">Outcome and scope</text>
+    <text x="72" y="247" class="card-body">set by the engineer</text>
 
-    <rect x="242" y="200" width="135" height="130" rx="18" class="node"/>
-    <circle cx="274" cy="232" r="14" fill="#38bdf8"/>
-    <text x="298" y="238" class="node-title">Brief</text>
-    <text x="266" y="276" class="node-detail">Constraints +</text>
-    <text x="266" y="298" class="node-detail">acceptance case</text>
+    <rect x="336" y="144" width="240" height="128" rx="16" class="card"/>
+    <rect x="356" y="164" width="36" height="24" rx="12" fill="#16344b"/>
+    <text x="366" y="181" class="step">02</text>
+    <text x="404" y="183" class="card-title">Brief</text>
+    <text x="360" y="222" class="card-body">Constraints and</text>
+    <text x="360" y="247" class="card-body">acceptance case</text>
 
-    <rect x="417" y="200" width="135" height="130" rx="18" class="node"/>
-    <circle cx="449" cy="232" r="14" fill="#38bdf8"/>
-    <text x="473" y="238" class="node-title">Plan</text>
-    <text x="441" y="276" class="node-detail">Concrete approach</text>
-    <text x="441" y="298" class="node-detail">for review</text>
+    <rect x="624" y="144" width="240" height="128" rx="16" class="card"/>
+    <rect x="644" y="164" width="36" height="24" rx="12" fill="#16344b"/>
+    <text x="654" y="181" class="step">03</text>
+    <text x="692" y="183" class="card-title">Plan</text>
+    <text x="648" y="222" class="card-body">Approach, trade-off,</text>
+    <text x="648" y="247" class="card-body">and verification</text>
 
-    <rect x="592" y="188" width="165" height="154" rx="18" fill="url(#approval)" stroke="#60a5fa" stroke-width="2"/>
-    <circle cx="624" cy="224" r="14" fill="#dbeafe"/>
-    <text x="648" y="230" class="node-title">Engineer approval</text>
-    <text x="616" y="270" class="node-detail">Pins brief, plan</text>
-    <text x="616" y="292" class="node-detail">and ruleset</text>
-    <text x="616" y="316" class="node-detail">before execution</text>
+    <rect x="912" y="144" width="240" height="128" rx="16" fill="#172a4f" stroke="#60a5fa" stroke-opacity=".8" stroke-width="1.5"/>
+    <rect x="932" y="164" width="36" height="24" rx="12" fill="#2563eb"/>
+    <text x="942" y="181" class="step">04</text>
+    <text x="980" y="183" class="card-title">Engineer approval</text>
+    <text x="936" y="222" class="card-body">Pins brief, plan,</text>
+    <text x="936" y="247" class="card-body">and ruleset</text>
 
-    <rect x="797" y="200" width="135" height="130" rx="18" class="node"/>
-    <circle cx="829" cy="232" r="14" fill="#38bdf8"/>
-    <text x="853" y="238" class="node-title">Implement</text>
-    <text x="821" y="276" class="node-detail">Agent writes the</text>
-    <text x="821" y="298" class="node-detail">approved change</text>
+    <rect x="912" y="344" width="240" height="128" rx="16" class="card"/>
+    <rect x="932" y="364" width="36" height="24" rx="12" fill="#16344b"/>
+    <text x="942" y="381" class="step">05</text>
+    <text x="980" y="383" class="card-title">Implement</text>
+    <text x="936" y="422" class="card-body">Agent writes the</text>
+    <text x="936" y="447" class="card-body">approved change</text>
 
-    <rect x="972" y="188" width="165" height="154" rx="18" fill="url(#evidence)" stroke="#6ee7b7" stroke-width="2"/>
-    <circle cx="1004" cy="224" r="14" fill="#d1fae5"/>
-    <text x="1028" y="230" class="node-title">Review + precommit</text>
-    <text x="996" y="270" class="node-detail">Checks + workspace</text>
-    <text x="996" y="292" class="node-detail">fingerprint become</text>
-    <text x="996" y="316" class="node-detail">recorded evidence</text>
+    <rect x="624" y="344" width="240" height="128" rx="16" fill="#12352f" stroke="#34d399" stroke-opacity=".8" stroke-width="1.5"/>
+    <rect x="644" y="364" width="36" height="24" rx="12" fill="#047857"/>
+    <text x="654" y="381" class="step">06</text>
+    <text x="692" y="383" class="card-title">Review + precommit</text>
+    <text x="648" y="422" class="card-body">Checks and fingerprint</text>
+    <text x="648" y="447" class="card-body">become evidence</text>
 
-    <rect x="1177" y="200" width="135" height="130" rx="18" class="node"/>
-    <circle cx="1209" cy="232" r="14" fill="#fbbf24"/>
-    <text x="1233" y="238" class="node-title">Verify</text>
-    <text x="1201" y="276" class="node-detail">Engineer records</text>
-    <text x="1201" y="298" class="node-detail">observed result</text>
+    <rect x="336" y="344" width="240" height="128" rx="16" fill="#2b2515" stroke="#fbbf24" stroke-opacity=".75" stroke-width="1.5"/>
+    <rect x="356" y="364" width="36" height="24" rx="12" fill="#a16207"/>
+    <text x="366" y="381" class="step">07</text>
+    <text x="404" y="383" class="card-title">Verify</text>
+    <text x="360" y="422" class="card-body">Engineer records the</text>
+    <text x="360" y="447" class="card-body">observed result</text>
 
-    <rect x="1352" y="200" width="56" height="130" rx="18" fill="#0f766e" stroke="#5eead4" stroke-width="2"/>
-    <path d="M1371 263 l10 10 19 -23" fill="none" stroke="#ccfbf1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="1362" y="304" class="node-detail" font-size="11">Close</text>
+    <rect x="48" y="344" width="240" height="128" rx="16" fill="#12323a" stroke="#2dd4bf" stroke-opacity=".75" stroke-width="1.5"/>
+    <rect x="68" y="364" width="36" height="24" rx="12" fill="#0f766e"/>
+    <text x="78" y="381" class="step">08</text>
+    <text x="116" y="383" class="card-title">Close</text>
+    <text x="72" y="422" class="card-body">Evidence still matches;</text>
+    <text x="72" y="447" class="card-body">the task can close</text>
   </g>
 
-  <g fill="none" stroke="#fbbf24" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#revision-arrow)">
-    <path d="M1244 330 V420 H742 V355"/>
-    <path d="M742 420 H484 V355"/>
-  </g>
-  <rect x="816" y="392" width="240" height="56" rx="28" fill="#3a2d13" stroke="#fbbf24" stroke-width="1.5"/>
-  <text x="850" y="426" class="label" font-size="16" font-weight="700">Verification fails → revise</text>
-  <text x="568" y="462" class="muted" font-size="14">Return to implementation when scope holds; return to planning when it changed.</text>
+  <path d="M456 472V504" fill="none" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" marker-end="url(#revision-arrow)"/>
+  <rect x="48" y="520" width="1104" height="116" rx="16" fill="#241e11" stroke="#fbbf24" stroke-opacity=".55" stroke-width="1.5"/>
+  <circle cx="80" cy="552" r="16" fill="#f59e0b"/>
+  <text x="77" y="558" class="ui" font-size="18" font-weight="800" fill="#1c1917">!</text>
+  <text x="108" y="558" class="ui" font-size="19" font-weight="700" fill="#fef3c7">Verification fails</text>
+  <text x="108" y="588" class="ui" font-size="15.5" fill="#d6c9aa">The failed result stays recorded.</text>
+  <line x1="398" y1="540" x2="398" y2="616" stroke="#fbbf24" stroke-opacity=".24"/>
+  <text x="430" y="554" class="eyebrow" fill="#fcd34d">SAME SCOPE</text>
+  <text x="430" y="584" class="ui" font-size="17" font-weight="700" fill="#f8fafc">Return to implementation</text>
+  <text x="748" y="554" class="eyebrow" fill="#fcd34d">SCOPE OR SOLUTION CHANGED</text>
+  <text x="748" y="584" class="ui" font-size="17" font-weight="700" fill="#f8fafc">Revise plan, then re-approve</text>
 
-  <text x="64" y="564" class="muted" font-size="15">AnchorLoop records the loop; it does not claim to authenticate the person providing an approval.</text>
+  <text x="48" y="684" class="footer">AnchorLoop records workflow evidence; it does not authenticate the person providing approval.</text>
 </svg>

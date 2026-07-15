@@ -53,8 +53,8 @@ class SkillInstallRecoveryTests(unittest.TestCase):
                     installer.install(platform="agents", project_scoped=True)
                 self.assertFalse(escaped.exists())
                 self.assertFalse(destination.exists())
-                finally:
-                    journal_filesystem.unlink(journal_path, missing_ok=True)
+            finally:
+                journal_filesystem.unlink(journal_path, missing_ok=True)
 
     def test_interrupted_initial_install_is_reported_without_mutation_then_rolls_forward(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -115,7 +115,6 @@ class SkillInstallRecoveryTests(unittest.TestCase):
                 if path.as_posix() == "SKILL.md":
                     content += b"\nJournal recovery update.\n"
                 updated_assets.append((path, content))
-            updated_assets.append((Path("references/recovery.md"), b"Recovered bundle.\n"))
 
             original_write = SkillInstaller._write_bytes
             writes = 0
@@ -147,12 +146,11 @@ class SkillInstallRecoveryTests(unittest.TestCase):
                 "Journal recovery update.",
                 (destination / "SKILL.md").read_text(encoding="utf-8"),
             )
-            self.assertEqual(
-                (destination / "references" / "recovery.md").read_text(encoding="utf-8"),
-                "Recovered bundle.\n",
-            )
             marker = json.loads((destination / ".anchorloop-skill.json").read_text(encoding="utf-8"))
-            self.assertIn("references/recovery.md", {entry["path"] for entry in marker["files"]})
+            self.assertEqual(
+                {"SKILL.md", "references/workflow.md"},
+                {entry["path"] for entry in marker["files"]},
+            )
             _, journal_path = installer._journal_context(destination)
             self.assertFalse(journal_path.exists())
 
@@ -200,6 +198,36 @@ class SkillInstallRecoveryTests(unittest.TestCase):
             )
             _, journal_path = installer._journal_context(destination)
             self.assertFalse(journal_path.exists())
+
+    def test_uninstall_recovery_requires_the_complete_owned_asset_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = SkillInstaller(root)
+            destination = installer.destination_for(platform="agents", project_scoped=True)
+            installer.install(platform="agents", project_scoped=True)
+            filesystem = installer._filesystem_for(True)
+            marker = json.loads(
+                (destination / ".anchorloop-skill.json").read_text(encoding="utf-8")
+            )
+            journal = installer._uninstall_journal(
+                filesystem=filesystem,
+                destination=destination,
+                platform="agents",
+                project_scoped=True,
+                version=marker["version"],
+                runtime=marker["runtime"],
+                owned_files=[],
+            )
+            journal_filesystem, journal_path = installer._journal_context(destination)
+            journal_filesystem.atomic_write_text(journal_path, json.dumps(journal) + "\n")
+            try:
+                with self.assertRaisesRegex(AnchorError, "canonical asset bundle"):
+                    installer.uninstall(platform="agents", project_scoped=True)
+                self.assertTrue((destination / "SKILL.md").is_file())
+                self.assertTrue((destination / "references" / "workflow.md").is_file())
+                self.assertTrue((destination / ".anchorloop-skill.json").is_file())
+            finally:
+                journal_filesystem.unlink(journal_path, missing_ok=True)
 
     def test_recovery_stops_an_opposite_requested_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -295,8 +323,8 @@ class SkillInstallRecoveryTests(unittest.TestCase):
                         installer.install(platform="agents", project_scoped=True)
                     self.assertEqual(skill.read_text(encoding="utf-8"), "post-crash user edit\n")
                     self.assertTrue(journal_path.is_file())
-            finally:
-                journal_filesystem.unlink(journal_path, missing_ok=True)
+                finally:
+                    journal_filesystem.unlink(journal_path, missing_ok=True)
 
     def test_recovery_refuses_to_delete_a_post_crash_recreated_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

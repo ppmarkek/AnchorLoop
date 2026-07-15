@@ -41,6 +41,7 @@ _START_TASK_ARGUMENTS = 'start "short task title"'
 BRIEF_FIELDS = ("outcome", "scope", "constraints", "invariant", "uncertainty")
 VERIFICATION_RESULTS = {"pass", "fail", "partial", "not-applicable"}
 CAREFUL_RECALL_DELAY_HOURS = 24
+TASK_SCHEMA_VERSION = 2
 
 # These are deliberately conservative signals.  They promote a task only when
 # an engineer explicitly names a sensitive area or provides a recognisably
@@ -423,7 +424,7 @@ class AnchorProject:
         for path in sorted(self.fs.glob(closed_directory, "*.json")):
             try:
                 task = self._read_json(path)
-                self.validate_task_schema(task)
+                self._validate_closed_task_integrity(task, path)
                 comprehension = task.get("comprehension")
                 if not isinstance(comprehension, dict):
                     continue
@@ -570,6 +571,22 @@ class AnchorProject:
                         else []
                     )
                     for closed_path in closed_paths:
+                        self._validate_closed_task_integrity(
+                            self._read_json(closed_path),
+                            closed_path,
+                        )
+                    checks.append({"name": "closed-task-integrity", "status": "passed"})
+                except Exception as error:
+                    failed("closed-task-integrity", error)
+
+                try:
+                    closed_directory = self.anchor_dir / "tasks" / "closed"
+                    closed_paths = (
+                        sorted(self.fs.glob(closed_directory, "*.json"))
+                        if self._exists(closed_directory)
+                        else []
+                    )
+                    for closed_path in closed_paths:
                         closed_task = self._read_json(closed_path)
                         self.validate_task_schema(closed_task)
                         comprehension = closed_task.get("comprehension")
@@ -647,6 +664,7 @@ class AnchorProject:
             raise AnchorError(f"Task {task['id']} is already active in state {task['state']}.")
         normalized_title = self._required_text(title, "Task title")
         task = {
+            "schema_version": TASK_SCHEMA_VERSION,
             "id": f"al-{datetime.now(UTC).strftime('%Y%m%d')}-{uuid4().hex[:6]}",
             "title": normalized_title,
             "state": "briefing",
@@ -843,20 +861,23 @@ class AnchorProject:
         task = self._task_in_state("planned", "approve")
         if "plan" not in task:
             raise AnchorError("A recorded plan is required before approval.")
+        self._normalize_task_schema_for_approval(task)
         snapshot = self._active_rules_snapshot()
         task["ruleset"] = snapshot
         approval_subject = self._task_approval_subject(task)
         subject_digest = self._document_digest(approval_subject)
         if provenance == "interactive-tty" and expected_subject_digest != subject_digest:
             raise AnchorError("The approval subject changed after it was displayed; review and confirm it again.")
-        task["approval"] = {
+        approval = {
             **self._approval_record(by, provenance, interactive_confirmed=interactive_confirmed),
             "plan_summary": task["plan"]["summary"],
             **self._task_approval_digests(approval_subject),
             "ruleset_version": snapshot["version"],
         }
         if provenance == "interactive-tty":
-            task["approval"]["confirmed_subject_digest"] = subject_digest
+            approval["confirmed_subject_digest"] = subject_digest
+        approval["record_digest"] = self._record_digest(approval)
+        task["approval"] = approval
         return self._advance_task(task, "approve", "approved")
 
     @consistent_read("task.approval-preview")
@@ -866,6 +887,7 @@ class AnchorProject:
         task = deepcopy(self._task_in_state("planned", "approve"))
         if "plan" not in task:
             raise AnchorError("A recorded plan is required before approval.")
+        self._normalize_task_schema_for_approval(task)
         task["ruleset"] = self._active_rules_snapshot()
         subject = self._task_approval_subject(task)
         return {
@@ -950,9 +972,15 @@ class AnchorProject:
             **self._approval_record(engineer, provenance, interactive_confirmed=interactive_confirmed),
             "result": normalized_result,
             "reason": normalized_reason,
+            "subject_digest": subject_digest,
+            "reported_metrics": self._verification_metric_snapshot(task),
+            "comprehension_digest": self._document_digest(
+                task.get("comprehension", {}).get("verification_check")
+            ),
         }
         if provenance == "interactive-tty":
             verification["confirmed_subject_digest"] = subject_digest
+        verification["record_digest"] = self._record_digest(verification)
         task["verification"] = verification
         if normalized_result == "fail":
             self._append_task_event(task, "task.verify.failed")
@@ -998,7 +1026,7 @@ class AnchorProject:
         response: str,
         score: int,
     ) -> dict[str, Any]:
-        if not TASK_ID_PATTERN.fullmatch(task_id):
+        if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
             raise AnchorError("Invalid AnchorLoop task ID.")
         if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 5:
             raise AnchorError("Delayed recall score must be an integer from 0 to 5.")
@@ -1006,18 +1034,7 @@ class AnchorProject:
         if not self._exists(path):
             raise AnchorError(f"Closed task '{task_id}' does not exist.")
         task = self._read_json(path)
-        self.validate_task_schema(task)
-        if task.get("id") != task_id or task.get("state") != "closed":
-            raise AnchorError("Delayed recall requires an intact closed task record.")
-        approval = task.get("approval")
-        expected_approval = self._task_approval_digests(self._task_approval_subject(task))
-        if (
-            not isinstance(approval, dict)
-            or approval.get("task_digest") != expected_approval["task_digest"]
-        ):
-            raise AnchorError(
-                "Closed task ownership or recall policy changed after approval; delayed recall is blocked."
-            )
+        self._validate_closed_task_integrity(task, path)
         comprehension = task.get("comprehension")
         if not isinstance(comprehension, dict) or not comprehension.get("recall_due_at"):
             raise AnchorError("This task has no scheduled delayed recall.")
@@ -1051,7 +1068,7 @@ class AnchorProject:
         corrective_refactor: bool,
         notes: str,
     ) -> dict[str, Any]:
-        if not TASK_ID_PATTERN.fullmatch(task_id):
+        if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
             raise AnchorError("Invalid AnchorLoop task ID.")
         if (
             not isinstance(defects_found, int)
@@ -1065,18 +1082,7 @@ class AnchorProject:
         if not self._exists(path):
             raise AnchorError(f"Closed task '{task_id}' does not exist.")
         task = self._read_json(path)
-        self.validate_task_schema(task)
-        if task.get("id") != task_id or task.get("state") != "closed":
-            raise AnchorError("Post-completion outcome requires an intact closed task record.")
-        approval = task.get("approval")
-        expected_approval = self._task_approval_digests(self._task_approval_subject(task))
-        if (
-            not isinstance(approval, dict)
-            or approval.get("task_digest") != expected_approval["task_digest"]
-        ):
-            raise AnchorError(
-                "Closed task ownership changed after approval; post-completion outcome is blocked."
-            )
+        self._validate_closed_task_integrity(task, path)
         record = {
             "at": self._timestamp(),
             "by": self._required_text(by, "Engineer name"),
@@ -1101,9 +1107,7 @@ class AnchorProject:
         closed_directory = self.anchor_dir / "tasks" / "closed"
         for path in sorted(self.fs.glob(closed_directory, "*.json")):
             task = self._read_json(path)
-            self.validate_task_schema(task)
-            if task.get("state") != "closed" or task.get("id") != path.stem:
-                raise AnchorError(f"Closed task record is inconsistent: {path}")
+            self._validate_closed_task_integrity(task, path)
             metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
             comprehension = (
                 task.get("comprehension")
@@ -1261,9 +1265,12 @@ class AnchorProject:
                 closed_at = self._closed_at(task)
                 delay = self._recall_delay_hours(comprehension)
                 comprehension["recall_due_at"] = (closed_at + timedelta(hours=delay)).isoformat()
+        if action == "close":
+            task["close_digest"] = self._closed_task_digest(task)
         self._append_task_event(task, f"task.{action}")
         if action == "close":
             closed_path = self.anchor_dir / "tasks" / "closed" / f"{task['id']}.json"
+            self._validate_closed_task_integrity(task, closed_path)
             self._write_json(closed_path, task)
             self._unlink(self.active_task_path)
             recall_due_at = (
@@ -2088,8 +2095,10 @@ class AnchorProject:
     def _write_json(self, path: Path, data: dict[str, Any]) -> None:
         candidate = self.fs.validate(path)
         closed_tasks = self.anchor_dir / "tasks" / "closed"
-        if candidate == self.active_task_path or candidate.parent == closed_tasks:
+        if candidate == self.active_task_path:
             self.validate_task_schema(data)
+        elif candidate.parent == closed_tasks:
+            self._validate_closed_task_integrity(data, candidate)
         self._write_text(path, json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
     def _write_json_if_missing(self, path: Path, data: dict[str, Any]) -> None:
@@ -2211,6 +2220,9 @@ class AnchorProject:
 
         if not isinstance(task, dict):
             raise AnchorError("Anchor task state must be a JSON object.")
+        schema_version = task.get("schema_version")
+        if schema_version is not None and schema_version != TASK_SCHEMA_VERSION:
+            raise AnchorError("Anchor task has an unsupported schema version.")
         task_id = task.get("id")
         if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
             raise AnchorError("Anchor task has an invalid ID.")
@@ -2220,6 +2232,7 @@ class AnchorProject:
         if state not in allowed_states:
             raise AnchorError(f"Anchor task has an invalid state: {state!r}.")
         cls._required_text(task.get("created_at"), "Task creation time")
+        cls._created_at(task)
         brief = cls.validate_brief_fields(task.get("brief"), allow_unfilled=True)
         brief_record = task.get("brief_record")
         brief_is_complete = all(value is not None for value in brief.values())
@@ -2258,9 +2271,79 @@ class AnchorProject:
             raise AnchorError("Anchor task plan must be an object.")
         for field in ("summary", "approach", "rejected_alternative", "primary_risk", "verification_strategy"):
             cls._required_text(plan.get(field), f"Anchor task plan {field}")
+        rollback_mitigation = plan.get("rollback_mitigation")
+        if rollback_mitigation is not None:
+            cls._required_text(rollback_mitigation, "Anchor task plan rollback mitigation")
+        if mode == "CAREFUL" and rollback_mitigation is None:
+            raise AnchorError("CAREFUL task ownership evidence requires rollback or mitigation guidance.")
+
+        metrics = task.get("metrics")
+        if not isinstance(metrics, dict):
+            raise AnchorError("Anchor task metrics must be an object.")
+        cls.validate_metric_types(
+            agent_turns=metrics.get("agent_turns"),
+            input_tokens=metrics.get("input_tokens"),
+            output_tokens=metrics.get("output_tokens"),
+            active_minutes=metrics.get("active_minutes"),
+            agent_provider=metrics.get("agent_provider"),
+            agent_model=metrics.get("agent_model"),
+        )
+        has_reported_metrics = any(
+            metrics.get(field) is not None
+            for field in (
+                "agent_turns",
+                "input_tokens",
+                "output_tokens",
+                "active_minutes",
+                "agent_provider",
+                "agent_model",
+            )
+        )
+        expected_metric_provenance = "reported-at-verification" if has_reported_metrics else None
+        if metrics.get("provenance") != expected_metric_provenance:
+            raise AnchorError("Anchor task metric provenance does not match its reported metrics.")
+
+        human_artifact = task.get("human_artifact")
+        if human_artifact is not None:
+            if not isinstance(human_artifact, dict):
+                raise AnchorError("Anchor task human ownership artifact must be an object.")
+            for field in ("content", "by", "at", "source"):
+                cls._required_text(
+                    human_artifact.get(field),
+                    f"Anchor task human ownership artifact {field}",
+                )
         comprehension = task.get("comprehension")
         if not isinstance(comprehension, dict):
             raise AnchorError("Anchor task comprehension policy must be an object.")
+        baseline = comprehension.get("baseline")
+        if baseline is not None:
+            if not isinstance(baseline, dict):
+                raise AnchorError("Anchor task comprehension baseline must be an object.")
+            for field in ("statement", "by", "at"):
+                cls._required_text(
+                    baseline.get(field),
+                    f"Anchor task comprehension baseline {field}",
+                )
+        if mode in {"STANDARD", "CAREFUL"} and (
+            human_artifact is None or baseline is None
+        ):
+            raise AnchorError(
+                f"{mode} task ownership evidence requires a human artifact and comprehension baseline."
+            )
+
+        verification_check = comprehension.get("verification_check")
+        if verification_check is not None:
+            if not isinstance(verification_check, dict):
+                raise AnchorError("Anchor task verification comprehension must be an object.")
+            for field in ("statement", "by", "at"):
+                cls._required_text(
+                    verification_check.get(field),
+                    f"Anchor task verification comprehension {field}",
+                )
+
+        due_at = comprehension.get("recall_due_at")
+        if due_at is not None:
+            cls._required_text(due_at, "Delayed recall due time")
         if mode == "CAREFUL":
             if "recall_delay_hours" in comprehension:
                 delay = comprehension.get("recall_delay_hours")
@@ -2272,34 +2355,245 @@ class AnchorProject:
                     raise AnchorError(
                         "CAREFUL tasks must retain the approved 24-hour delayed-recall policy."
                     )
+                if state == "closed" and due_at is None:
+                    raise AnchorError("Closed CAREFUL tasks require a delayed-recall schedule.")
+                if state != "closed" and due_at is not None:
+                    raise AnchorError(
+                        "CAREFUL delayed recall must be scheduled from the close time, not before close."
+                    )
             elif comprehension.get("recall_due_at") is None:
                 raise AnchorError(
                     "Legacy CAREFUL tasks must retain their approved delayed-recall timestamp."
                 )
-        elif comprehension.get("recall_delay_hours") is not None:
-            raise AnchorError("Only CAREFUL tasks may carry a delayed-recall policy.")
-        due_at = comprehension.get("recall_due_at")
-        if due_at is not None:
-            cls._required_text(due_at, "Delayed recall due time")
+        elif (
+            comprehension.get("recall_delay_hours") is not None
+            or due_at is not None
+            or comprehension.get("delayed_recall") is not None
+        ):
+            raise AnchorError("Only CAREFUL tasks may carry a delayed-recall policy or record.")
+
+        delayed_recall = comprehension.get("delayed_recall")
+        if delayed_recall is not None:
+            if not isinstance(delayed_recall, dict):
+                raise AnchorError("Delayed recall record must be an object.")
+            for field in ("statement", "by", "due_at", "recorded_at"):
+                cls._required_text(delayed_recall.get(field), f"Delayed recall {field}")
+            score = delayed_recall.get("score")
+            if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 5:
+                raise AnchorError("Delayed recall score must be an integer from 0 to 5.")
+            delay_seconds = delayed_recall.get("delay_seconds")
+            if (
+                not isinstance(delay_seconds, (int, float))
+                or isinstance(delay_seconds, bool)
+                or not math.isfinite(float(delay_seconds))
+                or delay_seconds < 0
+            ):
+                raise AnchorError("Delayed recall delay must be a finite non-negative number.")
+
+        approved_states = {
+            "approved",
+            "implementing",
+            "review_ready",
+            "quality_checked",
+            "verified",
+            "closed",
+        }
+        if state in approved_states:
+            approval = task.get("approval")
+            if not isinstance(approval, dict):
+                raise AnchorError("Approved task states require an approval record.")
+            for field in (
+                "by",
+                "at",
+                "provenance",
+                "brief_digest",
+                "brief_record_digest",
+                "plan_digest",
+                "ownership_digest",
+                "ruleset_digest",
+                "task_digest",
+                "ruleset_version",
+            ):
+                cls._required_text(approval.get(field), f"Anchor task approval {field}")
+            if approval.get("provenance") not in APPROVAL_PROVENANCE:
+                raise AnchorError("Anchor task approval has invalid provenance.")
+            confirmed_approval_digest = approval.get("confirmed_subject_digest")
+            if confirmed_approval_digest is not None:
+                cls._required_text(
+                    confirmed_approval_digest,
+                    "Anchor task confirmed approval subject digest",
+                )
+            approval_record_digest = approval.get("record_digest")
+            if schema_version == TASK_SCHEMA_VERSION and approval_record_digest is None:
+                raise AnchorError("Current task records require an approval record digest.")
+            if approval_record_digest is not None:
+                cls._required_text(
+                    approval_record_digest,
+                    "Anchor task approval record digest",
+                )
+                if approval_record_digest != cls._record_digest(approval):
+                    raise AnchorError("Anchor task approval record digest does not match.")
+            ruleset = task.get("ruleset")
+            if not isinstance(ruleset, dict):
+                raise AnchorError("Approved task states require a ruleset snapshot.")
+            cls._required_text(ruleset.get("version"), "Anchor task ruleset version")
+            if not isinstance(ruleset.get("rules"), dict) or not isinstance(
+                ruleset.get("documents"), dict
+            ):
+                raise AnchorError("Anchor task ruleset snapshot is invalid.")
+
+        quality = task.get("quality")
+        if quality is not None and (
+            not isinstance(quality, list)
+            or not all(isinstance(item, dict) for item in quality)
+        ):
+            raise AnchorError("Anchor task quality evidence must be a list of objects.")
+        evidence_states = {"quality_checked", "verified", "closed"}
+        if state in evidence_states:
+            if not quality or quality[-1].get("status") != "passed":
+                raise AnchorError("Quality-checked task states require passing quality evidence.")
+
         if state in {"verified", "closed"}:
             verification = task.get("verification")
             if not isinstance(verification, dict):
                 raise AnchorError("Verified tasks require a verification record.")
-            cls.validate_verification_result(verification.get("result"))
+            result = cls.validate_verification_result(verification.get("result"))
+            if result == "fail":
+                raise AnchorError("Verified or closed tasks cannot retain a failed verification result.")
             cls._required_text(verification.get("reason"), "Verification reason")
+            for field in ("by", "at", "provenance"):
+                cls._required_text(verification.get(field), f"Anchor task verification {field}")
+            if verification.get("provenance") not in APPROVAL_PROVENANCE:
+                raise AnchorError("Anchor task verification has invalid provenance.")
+            for field in ("subject_digest", "confirmed_subject_digest"):
+                value = verification.get(field)
+                if value is not None:
+                    cls._required_text(value, f"Anchor task verification {field}")
+            if (
+                schema_version == TASK_SCHEMA_VERSION
+                and verification.get("subject_digest") is None
+            ):
+                raise AnchorError(
+                    "Current task records require a verification subject digest."
+                )
+            reported_metrics = verification.get("reported_metrics")
+            expected_reported_metrics = cls._verification_metric_snapshot(task)
+            if schema_version == TASK_SCHEMA_VERSION and reported_metrics is None:
+                raise AnchorError("Current task records require a verification metric snapshot.")
+            if reported_metrics is not None:
+                if not isinstance(reported_metrics, dict) or reported_metrics != expected_reported_metrics:
+                    raise AnchorError(
+                        "Anchor task verification metric snapshot no longer matches stored metrics."
+                    )
+            comprehension_digest = verification.get("comprehension_digest")
+            expected_comprehension_digest = cls._document_digest(verification_check)
+            if schema_version == TASK_SCHEMA_VERSION and comprehension_digest is None:
+                raise AnchorError("Current task records require a verification comprehension digest.")
+            if comprehension_digest is not None:
+                cls._required_text(
+                    comprehension_digest,
+                    "Anchor task verification comprehension digest",
+                )
+                if comprehension_digest != expected_comprehension_digest:
+                    raise AnchorError(
+                        "Anchor task verification comprehension digest does not match."
+                    )
+            verification_record_digest = verification.get("record_digest")
+            if schema_version == TASK_SCHEMA_VERSION and verification_record_digest is None:
+                raise AnchorError("Current task records require a verification record digest.")
+            if verification_record_digest is not None:
+                cls._required_text(
+                    verification_record_digest,
+                    "Anchor task verification record digest",
+                )
+                if verification_record_digest != cls._record_digest(verification):
+                    raise AnchorError("Anchor task verification record digest does not match.")
+            if mode in {"STANDARD", "CAREFUL"} and verification_check is None:
+                raise AnchorError(
+                    f"{mode} verified tasks require a verification comprehension statement."
+                )
+        if state == "closed":
+            created_at = cls._created_at(task)
+            closed_at = cls._closed_at(task)
+            if closed_at < created_at:
+                raise AnchorError("Closed task timestamp cannot precede task creation.")
+            wall_seconds = metrics.get("wall_seconds")
+            if (
+                wall_seconds is not None
+                and (
+                    not isinstance(wall_seconds, (int, float))
+                    or isinstance(wall_seconds, bool)
+                    or not math.isfinite(float(wall_seconds))
+                    or wall_seconds < 0
+                )
+            ):
+                raise AnchorError("Closed task duration must be a finite non-negative number.")
+            if schema_version == TASK_SCHEMA_VERSION and wall_seconds is None:
+                raise AnchorError("Current closed task records require a close duration.")
+            if wall_seconds is not None:
+                expected_wall_seconds = (closed_at - created_at).total_seconds()
+                if not math.isclose(
+                    float(wall_seconds),
+                    expected_wall_seconds,
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                ):
+                    raise AnchorError(
+                        "Closed task duration does not match its creation and close timestamps."
+                    )
+            close_digest = task.get("close_digest")
+            approval_evidence = task.get("approval")
+            verification_evidence = task.get("verification")
+            has_current_integrity_evidence = (
+                schema_version == TASK_SCHEMA_VERSION
+                or (
+                    isinstance(approval_evidence, dict)
+                    and approval_evidence.get("record_digest") is not None
+                )
+                or (
+                    isinstance(verification_evidence, dict)
+                    and any(
+                        verification_evidence.get(field) is not None
+                        for field in (
+                            "record_digest",
+                            "reported_metrics",
+                            "comprehension_digest",
+                        )
+                    )
+                )
+            )
+            if has_current_integrity_evidence and close_digest is None:
+                raise AnchorError("Current closed task records require a close digest.")
+            if close_digest is not None:
+                cls._required_text(close_digest, "Anchor task close digest")
+                if close_digest != cls._closed_task_digest(task):
+                    raise AnchorError("Anchor task close digest does not match immutable close evidence.")
+
+    @staticmethod
+    def _created_at(task: dict[str, Any]) -> datetime:
+        value = task.get("created_at")
+        if not isinstance(value, str):
+            raise AnchorError("Task is missing its creation timestamp.")
+        try:
+            created_at = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise AnchorError("Task has an invalid creation timestamp.") from error
+        if created_at.tzinfo is None:
+            raise AnchorError("Task creation timestamp must include a timezone.")
+        return created_at
 
     @staticmethod
     def _closed_at(task: dict[str, Any]) -> datetime:
         metrics = task.get("metrics")
         value = metrics.get("closed_at") if isinstance(metrics, dict) else None
         if not isinstance(value, str):
-            raise AnchorError("Closed CAREFUL task is missing its close timestamp.")
+            raise AnchorError("Closed task is missing its close timestamp.")
         try:
             closed_at = datetime.fromisoformat(value)
         except ValueError as error:
-            raise AnchorError("Closed CAREFUL task has an invalid close timestamp.") from error
+            raise AnchorError("Closed task has an invalid close timestamp.") from error
         if closed_at.tzinfo is None:
-            raise AnchorError("Closed CAREFUL task timestamp must include a timezone.")
+            raise AnchorError("Closed task timestamp must include a timezone.")
         return closed_at
 
     @staticmethod
@@ -2357,11 +2651,179 @@ class AnchorProject:
             )
         return due_at
 
+    def _validate_closed_task_integrity(
+        self,
+        task: dict[str, Any],
+        path: Path,
+    ) -> None:
+        """Validate immutable close evidence without comparing it to the live workspace."""
+
+        prefix = f"Closed task record is inconsistent: {path}"
+        try:
+            self.validate_task_schema(task)
+            if task.get("state") != "closed" or task.get("id") != path.stem:
+                raise AnchorError("task state or ID does not match its closed-task path")
+
+            approval = task.get("approval")
+            expected_approval = self._task_approval_digests(
+                self._task_approval_subject(task)
+            )
+            if not isinstance(approval, dict):
+                raise AnchorError("approval evidence is missing")
+            changed_approval = [
+                field
+                for field, digest in expected_approval.items()
+                if approval.get(field) != digest
+            ]
+            if changed_approval:
+                raise AnchorError(
+                    "approval evidence no longer matches: "
+                    + ", ".join(changed_approval)
+                )
+            confirmed_approval = approval.get("confirmed_subject_digest")
+            if (
+                confirmed_approval is not None
+                and confirmed_approval != expected_approval["task_digest"]
+            ):
+                raise AnchorError("confirmed approval subject no longer matches")
+            ruleset = task.get("ruleset")
+            if (
+                not isinstance(ruleset, dict)
+                or approval.get("ruleset_version") != ruleset.get("version")
+            ):
+                raise AnchorError("approval ruleset version no longer matches")
+
+            quality = task.get("quality")
+            if (
+                not isinstance(quality, list)
+                or not quality
+                or not isinstance(quality[-1], dict)
+                or quality[-1].get("status") != "passed"
+            ):
+                raise AnchorError("latest quality evidence is not passing")
+
+            verification = task.get("verification")
+            if not isinstance(verification, dict):
+                raise AnchorError("verification evidence is missing")
+            result = verification.get("result")
+            if result not in {"pass", "partial", "not-applicable"}:
+                raise AnchorError("closing verification result is not accepted")
+            comprehension = task.get("comprehension")
+            verification_check = (
+                comprehension.get("verification_check")
+                if isinstance(comprehension, dict)
+                else None
+            )
+            recall = (
+                verification_check.get("statement")
+                if isinstance(verification_check, dict)
+                else None
+            )
+            expected_verification_digest = self._verification_subject_digest(
+                task,
+                result=result,
+                reason=verification.get("reason"),
+                recall=recall,
+            )
+            recorded_verification_digest = verification.get("subject_digest")
+            if (
+                recorded_verification_digest is not None
+                and recorded_verification_digest != expected_verification_digest
+            ):
+                raise AnchorError("verification subject no longer matches")
+            confirmed_verification_digest = verification.get(
+                "confirmed_subject_digest"
+            )
+            if (
+                confirmed_verification_digest is not None
+                and confirmed_verification_digest != expected_verification_digest
+            ):
+                raise AnchorError("confirmed verification subject no longer matches")
+
+            self._closed_at(task)
+            if task.get("mode") == "CAREFUL":
+                scheduled_due_at = self._scheduled_recall_due_at(task)
+                delayed_recall = (
+                    comprehension.get("delayed_recall")
+                    if isinstance(comprehension, dict)
+                    else None
+                )
+                if (
+                    isinstance(delayed_recall, dict)
+                    and delayed_recall.get("due_at") != scheduled_due_at.isoformat()
+                ):
+                    raise AnchorError("delayed recall record does not match its schedule")
+        except (AnchorError, KeyError, TypeError, ValueError) as error:
+            raise AnchorError(f"{prefix}: {error}") from error
+
 
     @staticmethod
     def _document_digest(document: Any) -> str:
         encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @classmethod
+    def _record_digest(cls, record: dict[str, Any]) -> str:
+        return cls._document_digest(
+            {key: value for key, value in record.items() if key != "record_digest"}
+        )
+
+    @staticmethod
+    def _verification_metric_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+        metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
+        return {
+            field: metrics.get(field)
+            for field in (
+                "agent_turns",
+                "input_tokens",
+                "output_tokens",
+                "active_minutes",
+                "agent_provider",
+                "agent_model",
+                "provenance",
+            )
+        }
+
+    @classmethod
+    def _closed_task_subject(cls, task: dict[str, Any]) -> dict[str, Any]:
+        comprehension = task.get("comprehension")
+        close_comprehension = {
+            field: comprehension.get(field)
+            for field in (
+                "verification_check",
+                "recall_delay_hours",
+                "recall_due_at",
+            )
+        } if isinstance(comprehension, dict) else None
+        metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
+        return {
+            "schema_version": task.get("schema_version"),
+            "task_id": task.get("id"),
+            "state": task.get("state"),
+            "created_at": task.get("created_at"),
+            "approval_subject": cls._task_approval_subject(task),
+            "approval": task.get("approval"),
+            "quality": task.get("quality"),
+            "verification": task.get("verification"),
+            "comprehension": close_comprehension,
+            "metrics": {
+                **cls._verification_metric_snapshot(task),
+                "closed_at": metrics.get("closed_at"),
+                "wall_seconds": metrics.get("wall_seconds"),
+            },
+        }
+
+    @classmethod
+    def _closed_task_digest(cls, task: dict[str, Any]) -> str:
+        return cls._document_digest(cls._closed_task_subject(task))
+
+    @staticmethod
+    def _normalize_task_schema_for_approval(task: dict[str, Any]) -> None:
+        # A planned legacy-shaped record has no immutable approval yet, so this
+        # is the safe migration boundary. Preview and mutation must normalize
+        # identically or an interactive confirmation can never match.
+        if task.get("schema_version") is None:
+            task["schema_version"] = TASK_SCHEMA_VERSION
 
     @staticmethod
     def _task_approval_subject(task: dict[str, Any]) -> dict[str, Any]:
@@ -2382,7 +2844,7 @@ class AnchorProject:
             }
         else:
             comprehension_policy = None
-        return {
+        subject = {
             "task_id": task.get("id"),
             "title": task.get("title"),
             "mode": task.get("mode"),
@@ -2394,6 +2856,9 @@ class AnchorProject:
             "comprehension_policy": comprehension_policy,
             "ruleset": task.get("ruleset"),
         }
+        if "schema_version" in task:
+            subject["schema_version"] = task.get("schema_version")
+        return subject
 
     def _task_approval_digests(self, subject: dict[str, Any]) -> dict[str, str]:
         return {

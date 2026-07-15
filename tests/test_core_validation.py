@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from anchorloop.project import AnchorError, AnchorProject
+from tests.git_fixture import init_git_repository
 
 
 BRIEF = {
@@ -32,6 +33,7 @@ class CoreValidationTests(unittest.TestCase):
         *,
         mode: str = "STANDARD",
     ) -> AnchorProject:
+        init_git_repository(root)
         project = self._project_in_briefing(root)
         project.record_brief(by="Ada Engineer", values=BRIEF)
         project.plan_task(
@@ -113,6 +115,75 @@ class CoreValidationTests(unittest.TestCase):
                     project.verify_task(**common, **metrics)  # type: ignore[arg-type]
                 self.assertEqual(active_path.read_bytes(), before)
 
+    def test_current_task_approval_attribution_is_integrity_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project_ready_for_verification(root)
+            active_path = root / ".anchor" / "tasks" / "active.json"
+            task = json.loads(active_path.read_text(encoding="utf-8"))
+            task["approval"]["by"] = "Mallory"
+            active_path.write_text(json.dumps(task), encoding="utf-8")
+
+            with self.assertRaisesRegex(AnchorError, "approval record digest"):
+                project.status()
+
+    def test_newly_closed_legacy_shaped_task_receives_close_integrity_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            init_git_repository(root)
+            project = self._project_in_briefing(root)
+            project.record_brief(by="Ada Engineer", values=BRIEF)
+            project.plan_task(
+                "Persist the retry attempt before delivery.",
+                mode="STANDARD",
+                task_type="feature",
+                approach="Write retry state before calling the destination.",
+                rejected_alternative="An in-memory counter loses state after restart.",
+                primary_risk="A retry could acknowledge one event twice.",
+                verification_strategy="Exercise duplicate and transient-failure scenarios.",
+                human_artifact="Acceptance case: one delivery acknowledgement per event.",
+                comprehension="Persisted state prevents duplicate acknowledgement.",
+                by="Ada Engineer",
+            )
+            active_path = root / ".anchor" / "tasks" / "active.json"
+            legacy_shaped = json.loads(active_path.read_text(encoding="utf-8"))
+            legacy_shaped.pop("schema_version")
+            active_path.write_text(json.dumps(legacy_shaped), encoding="utf-8")
+
+            preview = project.task_approval_preview()
+            project.approve_task(
+                "Ada Engineer",
+                provenance="interactive-tty",
+                interactive_confirmed=True,
+                expected_subject_digest=preview["subject_digest"],
+            )
+            project.transition("implement")
+            project.transition("review")
+            project.precommit()
+            project.verify_task(
+                by="Ada Engineer",
+                result="pass",
+                reason="The documented acceptance scenario passed.",
+                recall="Persisted retry state prevents duplicate acknowledgement.",
+            )
+            closed = project.transition("close")
+            self.assertEqual(closed["schema_version"], 2)
+            self.assertIn("close_digest", closed)
+
+            closed_path = root / ".anchor" / "tasks" / "closed" / f"{closed['id']}.json"
+            forged = json.loads(closed_path.read_text(encoding="utf-8"))
+            forged.pop("close_digest")
+            shift = timedelta(days=365)
+            forged["created_at"] = (
+                datetime.fromisoformat(forged["created_at"]) + shift
+            ).isoformat()
+            forged["metrics"]["closed_at"] = (
+                datetime.fromisoformat(forged["metrics"]["closed_at"]) + shift
+            ).isoformat()
+            closed_path.write_text(json.dumps(forged), encoding="utf-8")
+            with self.assertRaisesRegex(AnchorError, "close digest"):
+                project.experiment_report()
+
     def test_auto_risk_uses_russian_path_and_explicit_rule_signals(self) -> None:
         russian_brief = {
             **BRIEF,
@@ -171,6 +242,12 @@ class CoreValidationTests(unittest.TestCase):
             comprehension = legacy["comprehension"]
             comprehension.pop("recall_delay_hours")
             comprehension["recall_due_at"] = legacy_due_at.isoformat()
+            legacy.pop("schema_version")
+            legacy["verification"].pop("subject_digest")
+            legacy["verification"].pop("reported_metrics")
+            legacy["verification"].pop("comprehension_digest")
+            legacy["verification"].pop("record_digest")
+            legacy["approval"].pop("record_digest")
             legacy["approval"].update(
                 project._task_approval_digests(project._task_approval_subject(legacy))
             )
@@ -213,6 +290,84 @@ class CoreValidationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(AnchorError, "fields must be exact"):
                 project.record_brief(by="Ada Engineer", values=BRIEF)
+
+    def test_task_schema_requires_standard_ownership_evidence_before_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project_in_briefing(root)
+            project.record_brief(by="Ada Engineer", values=BRIEF)
+            project.plan_task(
+                "Persist the retry attempt before delivery.",
+                mode="STANDARD",
+                task_type="feature",
+                approach="Write retry state before calling the destination.",
+                rejected_alternative="An in-memory counter loses state after restart.",
+                primary_risk="A retry could acknowledge one event twice.",
+                verification_strategy="Exercise duplicate and transient-failure scenarios.",
+                human_artifact="Acceptance case: one acknowledgement per event.",
+                comprehension="Persisted state prevents duplicate acknowledgement.",
+                by="Ada Engineer",
+            )
+            active_path = root / ".anchor" / "tasks" / "active.json"
+            baseline = json.loads(active_path.read_text(encoding="utf-8"))
+            for field in ("human_artifact", "comprehension"):
+                with self.subTest(field=field):
+                    tampered = json.loads(json.dumps(baseline))
+                    if field == "human_artifact":
+                        tampered[field] = None
+                    else:
+                        tampered[field]["baseline"] = None
+                    active_path.write_text(json.dumps(tampered), encoding="utf-8")
+                    with self.assertRaisesRegex(AnchorError, "ownership evidence"):
+                        project.approve_task("Ada Engineer")
+            active_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    def test_closed_task_public_methods_reject_non_text_task_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = AnchorProject.at(Path(directory))
+            project.apply_setup("add")
+            for task_id in (None, 1, b"task", Path("task")):
+                with self.subTest(task_id=task_id):
+                    with self.assertRaisesRegex(AnchorError, "Invalid AnchorLoop task ID"):
+                        project.record_delayed_recall(
+                            task_id=task_id,  # type: ignore[arg-type]
+                            by="Ada Engineer",
+                            response="Recall",
+                            score=3,
+                        )
+                    with self.assertRaisesRegex(AnchorError, "Invalid AnchorLoop task ID"):
+                        project.record_post_completion_outcome(
+                            task_id=task_id,  # type: ignore[arg-type]
+                            by="Ada Engineer",
+                            defects_found=0,
+                            rollback=False,
+                            corrective_refactor=False,
+                            notes="No issue.",
+                        )
+
+    def test_task_schema_requires_approval_and_quality_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self._project_ready_for_verification(root)
+            active_path = root / ".anchor" / "tasks" / "active.json"
+            baseline = json.loads(active_path.read_text(encoding="utf-8"))
+            cases = (
+                ("approval", "approval record"),
+                ("quality", "passing quality evidence"),
+            )
+            for field, message in cases:
+                with self.subTest(field=field):
+                    tampered = json.loads(json.dumps(baseline))
+                    tampered.pop(field)
+                    active_path.write_text(json.dumps(tampered), encoding="utf-8")
+                    with self.assertRaisesRegex(AnchorError, message):
+                        project.verify_task(
+                            by="Ada Engineer",
+                            result="pass",
+                            reason="The documented acceptance scenario passed.",
+                            recall="Persisted state prevents duplicate acknowledgement.",
+                        )
+            active_path.write_text(json.dumps(baseline), encoding="utf-8")
 
 
 if __name__ == "__main__":

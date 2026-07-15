@@ -4,7 +4,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { assertVersionConsistency } = require("../scripts/version.js");
+const { assertBundledVersionConsistency } = require("../scripts/version.js");
 
 const packageRoot = path.resolve(__dirname, "..", "..");
 const sourceRoot = path.join(packageRoot, "src");
@@ -18,7 +18,7 @@ const isolatedPythonEntry = [
 ].join("; ");
 
 function bundledRelease() {
-  return assertVersionConsistency({ root: packageRoot });
+  return assertBundledVersionConsistency({ root: packageRoot });
 }
 
 function printUsage() {

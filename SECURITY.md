@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-AnchorLoop 0.1 is a public-alpha release candidate. Security fixes are applied to the current development
-version; older snapshots are not maintained.
+The published baseline is `anchorloop@0.1.0` (public alpha). Version `0.2.0` is an unreleased release
+candidate. Security fixes are applied to the current development version; older snapshots are not maintained.
 
 ## Reporting a vulnerability
 

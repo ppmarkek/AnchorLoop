@@ -1,103 +1,102 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 660" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title description">
   <title id="title">AnchorLoop evidence integrity</title>
-  <desc id="description">Approved brief, plan, and ruleset create an approval record with digests. Precommit checks create a workspace fingerprint. Changes to approved artifacts archive the approval, while changes to the workspace require review and precommit again before verification or close.</desc>
+  <desc id="description">Approved brief, plan, and ruleset are pinned in an approval record. Precommit checks and a workspace fingerprint create quality evidence. Verification and close require both records to remain current; changed inputs archive approval, and changed workspace content requires review and precommit again.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#111827"/>
-      <stop offset="1" stop-color="#172554"/>
-    </linearGradient>
-    <linearGradient id="approved" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1d4ed8"/>
-      <stop offset="1" stop-color="#4338ca"/>
-    </linearGradient>
-    <linearGradient id="checked" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#047857"/>
-      <stop offset="1" stop-color="#0f766e"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-30%" width="140%" height="170%">
-      <feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#020617" flood-opacity=".35"/>
-    </filter>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#93c5fd"/>
-    </marker>
-    <marker id="danger" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb7185"/>
+    <marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#93c5fd"/>
     </marker>
     <style>
-      .heading { font-family: Inter, Segoe UI, Arial, sans-serif; font-weight: 700; fill: #f8fafc; }
-      .body { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #cbd5e1; }
-      .small { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #bfdbfe; font-size: 13px; }
-      .card { fill: #172b45; stroke: #3b5f83; stroke-width: 1.5; }
-      .card-title { font-family: Inter, Segoe UI, Arial, sans-serif; fill: #f8fafc; font-size: 18px; font-weight: 700; }
+      .ui { font-family: Inter, "Segoe UI", Arial, sans-serif; }
+      .heading { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 30px; font-weight: 700; fill: #f8fafc; }
+      .subtitle { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 17px; fill: #b9c8dc; }
+      .card { fill: #111c2f; stroke: #ffffff; stroke-opacity: .11; stroke-width: 1.5; }
+      .title { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 22px; font-weight: 700; fill: #f8fafc; }
+      .item-title { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 18px; font-weight: 700; fill: #f8fafc; }
+      .body { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 16px; fill: #cbd5e1; }
+      .small { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 14.5px; fill: #aebfd3; }
+      .eyebrow { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 13px; font-weight: 800; letter-spacing: .08em; }
+      .footer { font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 14.5px; fill: #9fb0c6; }
+      .flow { fill: none; stroke: #93c5fd; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#flow-arrow); }
     </style>
   </defs>
 
-  <rect width="1440" height="660" rx="28" fill="url(#background)"/>
-  <text x="64" y="72" class="heading" font-size="34">Evidence is tied to exactly what was approved and checked</text>
-  <text x="64" y="106" class="body" font-size="18">Every later gate depends on recorded inputs remaining unchanged.</text>
+  <rect x=".75" y=".75" width="1198.5" height="718.5" rx="24" fill="#0b1220" stroke="#ffffff" stroke-opacity=".1" stroke-width="1.5"/>
 
-  <g filter="url(#shadow)">
-    <rect x="64" y="180" width="170" height="104" rx="18" class="card"/>
-    <text x="88" y="220" class="card-title">Engineer brief</text>
-    <text x="88" y="248" class="small">Outcome · scope</text>
-    <text x="88" y="269" class="small">constraints</text>
+  <text x="48" y="58" class="heading">Evidence expires when reality changes</text>
+  <text x="48" y="89" class="subtitle">Verify and close stay available only while the approved inputs and checked workspace still match.</text>
+  <line x1="48" y1="116" x2="1152" y2="116" stroke="#ffffff" stroke-opacity=".1"/>
 
-    <rect x="64" y="322" width="170" height="104" rx="18" class="card"/>
-    <text x="88" y="362" class="card-title">Plan</text>
-    <text x="88" y="390" class="small">Concrete approach</text>
-    <text x="88" y="411" class="small">for approval</text>
-
-    <rect x="64" y="464" width="170" height="104" rx="18" class="card"/>
-    <text x="88" y="504" class="card-title">Ruleset snapshot</text>
-    <text x="88" y="532" class="small">Approved quality,</text>
-    <text x="88" y="553" class="small">security, structure</text>
-
-    <rect x="365" y="245" width="260" height="200" rx="20" fill="url(#approved)" stroke="#93c5fd" stroke-width="2"/>
-    <text x="397" y="290" class="card-title">Approval record</text>
-    <text x="397" y="326" class="body" font-size="15">• brief digest</text>
-    <text x="397" y="354" class="body" font-size="15">• plan digest</text>
-    <text x="397" y="382" class="body" font-size="15">• ruleset digest</text>
-    <text x="397" y="416" class="small">Explicit approval permits implementation</text>
-
-    <rect x="765" y="180" width="270" height="148" rx="20" class="card"/>
-    <text x="797" y="224" class="card-title">Precommit evidence</text>
-    <text x="797" y="258" class="body" font-size="15">Syntax · whitespace · active security scan</text>
-    <text x="797" y="290" class="small">Only enabled, approved rules apply</text>
-
-    <rect x="765" y="392" width="270" height="148" rx="20" fill="url(#checked)" stroke="#6ee7b7" stroke-width="2"/>
-    <text x="797" y="436" class="card-title">Workspace fingerprint</text>
-    <text x="797" y="470" class="body" font-size="15">SHA-256 over materialized tracked</text>
-    <text x="797" y="494" class="body" font-size="15">and non-ignored untracked content</text>
-    <text x="797" y="522" class="small">Submodule HEAD + dirty status are included</text>
-
-    <rect x="1170" y="264" width="205" height="162" rx="20" fill="#123145" stroke="#38bdf8" stroke-width="2"/>
-    <text x="1202" y="308" class="card-title">Verify / close</text>
-    <text x="1202" y="344" class="body" font-size="15">Allowed only when</text>
-    <text x="1202" y="368" class="body" font-size="15">approval and quality</text>
-    <text x="1202" y="392" class="body" font-size="15">evidence still match</text>
+  <g aria-hidden="true">
+    <path class="flow" d="M334 232H382"/>
+    <path class="flow" d="M605 308V348"/>
+    <path class="flow" d="M820 230H858V292H888"/>
+    <path class="flow" d="M820 450H888"/>
+    <text x="622" y="334" class="eyebrow" fill="#bfdbfe">IMPLEMENTATION</text>
   </g>
 
-  <g fill="none" stroke="#93c5fd" stroke-width="3" marker-end="url(#arrow)">
-    <path d="M234 232 H300 V292 H345"/>
-    <path d="M234 374 H345"/>
-    <path d="M234 516 H300 V398 H345"/>
-    <path d="M625 345 H700 V254 H745"/>
-    <path d="M625 345 H700 V466 H745"/>
-    <path d="M1035 254 H1105 V318 H1150"/>
-    <path d="M1035 466 H1105 V372 H1150"/>
+  <g>
+    <rect x="48" y="152" width="286" height="332" rx="16" class="card"/>
+    <text x="72" y="184" class="eyebrow" fill="#7dd3fc">APPROVED INPUTS</text>
+    <line x1="72" y1="202" x2="310" y2="202" stroke="#ffffff" stroke-opacity=".1"/>
+
+    <text x="72" y="233" class="item-title">Engineer brief</text>
+    <text x="72" y="257" class="small">Outcome, scope, constraints</text>
+    <line x1="72" y1="278" x2="310" y2="278" stroke="#ffffff" stroke-opacity=".08"/>
+
+    <text x="72" y="309" class="item-title">Plan</text>
+    <text x="72" y="333" class="small">Approach and verification</text>
+    <line x1="72" y1="354" x2="310" y2="354" stroke="#ffffff" stroke-opacity=".08"/>
+
+    <text x="72" y="385" class="item-title">Ruleset snapshot</text>
+    <text x="72" y="409" class="small">Quality, security, structure</text>
+    <rect x="72" y="438" width="130" height="26" rx="13" fill="#16344b"/>
+    <circle cx="88" cy="451" r="4" fill="#38bdf8"/>
+    <text x="100" y="456" class="ui" font-size="13.5" font-weight="700" fill="#cfe8fb">Pinned by digest</text>
+
+    <rect x="390" y="152" width="430" height="156" rx="16" fill="#172a4f" stroke="#60a5fa" stroke-opacity=".8" stroke-width="1.5"/>
+    <text x="414" y="184" class="eyebrow" fill="#93c5fd">01  APPROVAL RECORD</text>
+    <text x="414" y="220" class="title">What the engineer approved</text>
+    <text x="414" y="254" class="body">Brief digest &#183; Plan digest &#183; Ruleset digest</text>
+    <text x="414" y="283" class="small">Explicit approval permits implementation.</text>
+
+    <rect x="390" y="356" width="430" height="186" rx="16" fill="#12352f" stroke="#34d399" stroke-opacity=".8" stroke-width="1.5"/>
+    <text x="414" y="388" class="eyebrow" fill="#6ee7b7">02  QUALITY EVIDENCE</text>
+    <text x="414" y="422" class="title">What was actually checked</text>
+    <line x1="604" y1="442" x2="604" y2="518" stroke="#ffffff" stroke-opacity=".12"/>
+
+    <text x="414" y="462" class="item-title">Precommit checks</text>
+    <text x="414" y="488" class="small">Syntax + whitespace</text>
+    <text x="414" y="511" class="small">Approved security rules</text>
+
+    <text x="618" y="462" class="item-title" font-size="17">Workspace fingerprint</text>
+    <text x="618" y="488" class="small">SHA-256 over checked</text>
+    <text x="618" y="511" class="small">workspace + submodules</text>
+
+    <rect x="896" y="236" width="256" height="220" rx="16" fill="#12323a" stroke="#38bdf8" stroke-opacity=".85" stroke-width="1.5"/>
+    <text x="920" y="274" class="eyebrow" fill="#7dd3fc">FINAL GATE</text>
+    <circle cx="1116" cy="272" r="16" fill="#0f766e"/>
+    <path d="M1108 272l6 6 11-14" fill="none" stroke="#ccfbf1" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="920" y="320" class="title">Verify / close</text>
+    <text x="920" y="358" class="body">Allowed only while</text>
+    <text x="920" y="383" class="body">approval and quality</text>
+    <text x="920" y="408" class="body">evidence still match.</text>
+    <rect x="920" y="424" width="150" height="24" rx="12" fill="#0f4852"/>
+    <text x="934" y="441" class="ui" font-size="12.5" font-weight="800" letter-spacing=".05em" fill="#a5f3fc">NO STALE EVIDENCE</text>
   </g>
 
-  <g fill="none" stroke="#fb7185" stroke-width="3" stroke-dasharray="8 8" marker-end="url(#danger)">
-    <path d="M495 245 V154 H334"/>
-    <path d="M900 540 V594 H1095"/>
+  <g>
+    <rect x="48" y="584" width="520" height="72" rx="14" fill="#2b1820" stroke="#fb7185" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="76" cy="620" r="12" fill="#be123c"/>
+    <text x="73" y="625" class="ui" font-size="16" font-weight="800" fill="#fff1f2">!</text>
+    <text x="100" y="610" class="eyebrow" fill="#fda4af">APPROVED INPUT CHANGED</text>
+    <text x="100" y="638" class="ui" font-size="16.5" font-weight="700" fill="#ffe4e6">Archive approval &#8594; revise and re-approve</text>
+
+    <rect x="584" y="584" width="568" height="72" rx="14" fill="#2b1820" stroke="#fb7185" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="612" cy="620" r="12" fill="#be123c"/>
+    <text x="609" y="625" class="ui" font-size="16" font-weight="800" fill="#fff1f2">!</text>
+    <text x="636" y="610" class="eyebrow" fill="#fda4af">WORKSPACE CHANGED AFTER CHECKS</text>
+    <text x="636" y="638" class="ui" font-size="16.5" font-weight="700" fill="#ffe4e6">Return to review &#8594; rerun precommit</text>
   </g>
-  <rect x="254" y="132" width="260" height="46" rx="23" fill="#4c1d2b" stroke="#fb7185" stroke-width="1.5"/>
-  <text x="279" y="161" class="body" font-size="14" font-weight="700">Brief, plan or rules change</text>
-  <text x="254" y="198" class="small" fill="#fecdd3">Archive stale approval → re-approve</text>
 
-  <rect x="1080" y="572" width="270" height="46" rx="23" fill="#4c1d2b" stroke="#fb7185" stroke-width="1.5"/>
-  <text x="1107" y="601" class="body" font-size="14" font-weight="700">Workspace changes after checks</text>
-  <text x="988" y="646" class="small" fill="#fecdd3">Return to review_ready → rerun precommit</text>
-
-  <text x="64" y="626" class="small">These records provide auditability, not proof of a person's identity or access-control enforcement.</text>
+  <text x="48" y="692" class="footer">Audit evidence, not proof of identity or access control.</text>
 </svg>

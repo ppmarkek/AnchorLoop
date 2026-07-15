@@ -204,6 +204,88 @@ class SkillInstallMatrixTests(unittest.TestCase):
                     self.assertFalse(home.joinpath(*location, "skills", "anchorloop").exists())
                 self.assertFalse((home / ".agents").exists())
 
+    def test_marker_tampering_never_expands_uninstall_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = SkillInstaller(root)
+            destination = installer.destination_for(platform="agents", project_scoped=True)
+            installer.install(platform="agents", project_scoped=True)
+            note = destination / "user-note.txt"
+            note.write_text("preserve me\n", encoding="utf-8")
+            marker_path = destination / ".anchorloop-skill.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["files"].append(
+                {
+                    "path": "user-note.txt",
+                    "sha256": f"sha256:{hashlib.sha256(note.read_bytes()).hexdigest()}",
+                }
+            )
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+            with self.assertRaisesRegex(AnchorError, "unknown owned paths"):
+                installer.uninstall(platform="agents", project_scoped=True)
+            self.assertTrue(note.is_file())
+            self.assertTrue((destination / "SKILL.md").is_file())
+
+            installer.uninstall(platform="agents", project_scoped=True, force=True)
+            self.assertTrue(note.is_file())
+            self.assertFalse(marker_path.exists())
+            self.assertFalse((destination / "SKILL.md").exists())
+
+    def test_force_update_repairs_injected_marker_without_deleting_user_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installer = SkillInstaller(root)
+            destination = installer.destination_for(platform="codex", project_scoped=True)
+            installer.install(platform="codex", project_scoped=True)
+            note = destination / "user-note.txt"
+            note.write_text("preserve me\n", encoding="utf-8")
+            marker_path = destination / ".anchorloop-skill.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["files"].append(
+                {
+                    "path": "user-note.txt",
+                    "sha256": f"sha256:{hashlib.sha256(note.read_bytes()).hexdigest()}",
+                }
+            )
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+            installer.install(platform="codex", project_scoped=True, force=True)
+            self.assertEqual(note.read_text(encoding="utf-8"), "preserve me\n")
+            repaired = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {entry["path"] for entry in repaired["files"]},
+                {"SKILL.md", "references/workflow.md"},
+            )
+
+    def test_force_does_not_accept_malformed_marker_entries(self) -> None:
+        malformed_entries = (
+            [
+                {"path": "SKILL.md", "sha256": "sha256:" + "0" * 64},
+                {"path": "SKILL.md", "sha256": "sha256:" + "0" * 64},
+            ],
+            [
+                {"path": "SKILL.md", "sha256": "not-a-digest"},
+                {"path": "references/workflow.md", "sha256": "sha256:" + "0" * 64},
+            ],
+            [
+                {"path": "../outside.txt", "sha256": "sha256:" + "0" * 64},
+                {"path": "SKILL.md", "sha256": "sha256:" + "0" * 64},
+            ],
+        )
+        for entries in malformed_entries:
+            with self.subTest(entries=entries), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                installer = SkillInstaller(root)
+                destination = installer.destination_for(platform="agents", project_scoped=True)
+                installer.install(platform="agents", project_scoped=True)
+                marker_path = destination / ".anchorloop-skill.json"
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                marker["files"] = entries
+                marker_path.write_text(json.dumps(marker), encoding="utf-8")
+                with self.assertRaises(AnchorError):
+                    installer.install(platform="agents", project_scoped=True, force=True)
+
 
 if __name__ == "__main__":
     unittest.main()

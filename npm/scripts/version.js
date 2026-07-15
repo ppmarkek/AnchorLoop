@@ -34,11 +34,8 @@ function readCanonicalVersion(root = repositoryRoot) {
   return match[1];
 }
 
-function assertVersionConsistency(options = {}) {
+function assertBundledVersionConsistency(options = {}) {
   const root = options.root || repositoryRoot;
-  const releaseTag = options.releaseTag === undefined
-    ? process.env.ANCHORLOOP_RELEASE_TAG
-    : options.releaseTag;
   const version = readCanonicalVersion(root);
   const packagePath = path.join(root, "package.json");
   const packageMetadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
@@ -52,6 +49,16 @@ function assertVersionConsistency(options = {}) {
   if (packageMetadata.dependencies?.[packageName]) {
     throw new Error("AnchorLoop must not depend on itself.");
   }
+
+  return { packageName, version };
+}
+
+function assertVersionConsistency(options = {}) {
+  const root = options.root || repositoryRoot;
+  const releaseTag = options.releaseTag === undefined
+    ? process.env.ANCHORLOOP_RELEASE_TAG
+    : options.releaseTag;
+  const { packageName, version } = assertBundledVersionConsistency({ root });
 
   const lockPath = path.join(root, "package-lock.json");
   const packageLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
@@ -113,6 +120,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertBundledVersionConsistency,
   assertPackageName,
   assertVersionConsistency,
   readCanonicalVersion,

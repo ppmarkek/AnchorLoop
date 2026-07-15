@@ -11,6 +11,7 @@ const repositoryRoot = path.resolve(__dirname, "..", "..");
 const launcher = path.join(repositoryRoot, "npm", "bin", "anchorloop.js");
 const packageMetadata = require(path.join(repositoryRoot, "package.json"));
 const { readCanonicalVersion } = require(path.join(repositoryRoot, "npm", "scripts", "version.js"));
+const { buildGlobalPlatformPlan } = require(path.join(repositoryRoot, "npm", "scripts", "registry-smoke.js"));
 const { parseShortcutOptions, shouldOpenGuidedInstaller } = require(launcher);
 
 function runLauncher(args, cwd) {
@@ -21,6 +22,38 @@ function runLauncher(args, cwd) {
     windowsHide: true,
   });
 }
+
+test("registry smoke isolates all six global platform destinations", () => {
+  const workspace = path.join("release-smoke", "workspace");
+  const plan = buildGlobalPlatformPlan(workspace);
+
+  assert.deepEqual(plan.map(({ platform }) => platform), [
+    "agents",
+    "codex",
+    "cursor",
+    "gemini",
+    "claude",
+    "opencode",
+  ]);
+  assert.deepEqual(
+    plan.map(({ platform, home, project, destination }) => ({
+      platform,
+      home: path.relative(workspace, home).split(path.sep).join("/"),
+      project: path.relative(workspace, project).split(path.sep).join("/"),
+      destination: path.relative(home, destination).split(path.sep).join("/"),
+    })),
+    [
+      { platform: "agents", home: "home-agents", project: "project-agents", destination: ".agents/skills/anchorloop" },
+      { platform: "codex", home: "home-codex", project: "project-codex", destination: ".codex/skills/anchorloop" },
+      { platform: "cursor", home: "home-cursor", project: "project-cursor", destination: ".cursor/skills/anchorloop" },
+      { platform: "gemini", home: "home-gemini", project: "project-gemini", destination: ".gemini/skills/anchorloop" },
+      { platform: "claude", home: "home-claude", project: "project-claude", destination: ".claude/skills/anchorloop" },
+      { platform: "opencode", home: "home-opencode", project: "project-opencode", destination: ".config/opencode/skills/anchorloop" },
+    ],
+  );
+  assert.equal(new Set(plan.map(({ home }) => home)).size, plan.length);
+  assert.equal(new Set(plan.map(({ project }) => project)).size, plan.length);
+});
 
 test("the shortcut installs a Codex skill that keeps an npx command runner", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anchorloop-npx-"));
@@ -236,6 +269,39 @@ test("the actual npm tarball contains only release runtime and documentation fil
     ]) {
       assert(entries.includes(required), `missing release archive entry: ${required}`);
     }
+    assert.equal(
+      entries.includes("package/package-lock.json"),
+      false,
+      "published runtime must not depend on checkout-only package-lock.json",
+    );
+
+    const extractRoot = path.join(temporaryRoot, "extracted");
+    fs.mkdirSync(extractRoot);
+    const extract = spawnSync("tar", ["-xzf", archive, "-C", extractRoot], {
+      cwd: temporaryRoot,
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true,
+    });
+    assert.equal(extract.status, 0, extract.stderr);
+
+    const packagedRoot = path.join(extractRoot, "package");
+    const packagedVersion = spawnSync(
+      process.execPath,
+      [path.join(packagedRoot, "npm", "bin", "anchorloop.js"), "--version"],
+      {
+        cwd: packagedRoot,
+        encoding: "utf8",
+        shell: false,
+        windowsHide: true,
+      },
+    );
+    assert.equal(
+      packagedVersion.status,
+      0,
+      `${packagedVersion.stdout}\n${packagedVersion.stderr}`,
+    );
+    assert.equal(packagedVersion.stdout.trim(), packageMetadata.version);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
