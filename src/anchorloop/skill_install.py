@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import wraps
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, NoReturn, TypeVar
 
 from .project_lock import ProjectLock
 from .safe_fs import AnchorError, SafeProjectFS
@@ -75,8 +75,11 @@ SKILL_RUNTIME_ANCHOR = "anchor"
 SKILL_RUNTIME_NPX = "npx"
 SUPPORTED_SKILL_RUNTIMES = (SKILL_RUNTIME_ANCHOR, SKILL_RUNTIME_NPX)
 _MARKER_NAME = ".anchorloop-skill.json"
+_SKILL_MARKER_SCHEMA = 2
+_SKILL_OWNED_PATHS = frozenset({"SKILL.md", "references/workflow.md"})
+_SKILL_SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _INSTALL_JOURNAL_NAME = "skill-install-journal.json"
-_INSTALL_JOURNAL_SCHEMA = 1
+_INSTALL_JOURNAL_SCHEMA = 2
 _NPX_PACKAGE_PATTERN = re.compile(
     r"(?:[a-z0-9][a-z0-9._-]*|@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*)"
     r"@[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
@@ -194,6 +197,10 @@ class SkillInstallation:
     runtime: str
 
 
+class SkillRecoveryCompleted(AnchorError):
+    """A pending installer transaction was recovered instead of starting new work."""
+
+
 class SkillInstaller:
     """Install the packaged thin agent adapter without owning workflow state."""
 
@@ -239,6 +246,36 @@ class SkillInstaller:
             return self._project_fs
         return SafeProjectFS(Path.home())
 
+    @installation_locked("recover")
+    def recover_pending(
+        self,
+        *,
+        platform: str,
+        project_scoped: bool,
+        requested_action: str,
+    ) -> None:
+        """Finish durable recovery before a multi-destination batch mutates anything."""
+
+        if requested_action not in {"install", "uninstall"}:
+            raise AnchorError("Skill recovery requires an install or uninstall action.")
+        filesystem = self._filesystem_for(project_scoped)
+        destination = self.destination_for(
+            platform=platform,
+            project_scoped=project_scoped,
+        )
+        recovered = self._recover_pending_installation(
+            filesystem,
+            destination,
+            platform=platform,
+            project_scoped=project_scoped,
+        )
+        if recovered is not None:
+            self._raise_recovery_completed(
+                recovered,
+                destination,
+                requested_action=requested_action,
+            )
+
     @installation_locked("install")
     def install(
         self,
@@ -249,15 +286,21 @@ class SkillInstaller:
         npx_package: str | None = None,
         force: bool = False,
     ) -> SkillInstallation:
-        self._validate_runtime(runtime, npx_package)
         filesystem = self._filesystem_for(project_scoped)
         destination = self.destination_for(platform=platform, project_scoped=project_scoped)
-        self._recover_pending_installation(
+        recovered = self._recover_pending_installation(
             filesystem,
             destination,
             platform=platform,
             project_scoped=project_scoped,
         )
+        if recovered is not None:
+            self._raise_recovery_completed(
+                recovered,
+                destination,
+                requested_action="install",
+            )
+        self._validate_runtime(runtime, npx_package)
         marker_path = self._safe_child(filesystem, destination, Path(_MARKER_NAME))
         if filesystem.exists(destination) and not filesystem.exists(marker_path) and not force:
             raise AnchorError(
@@ -268,9 +311,13 @@ class SkillInstaller:
         previous_files: dict[str, str | None] = {}
         if filesystem.exists(marker_path):
             previous_marker = self._read_marker(filesystem, marker_path)
-            if previous_marker.get("platform") != platform:
-                raise AnchorError(f"Skill marker at {destination} is for a different platform.")
-            previous_files = self._marker_files(previous_marker, marker_path)
+            self._validate_marker_identity(
+                previous_marker,
+                marker_path,
+                platform=platform,
+                project_scoped=project_scoped,
+            )
+            previous_files = self._marker_files(previous_marker, marker_path, force=force)
             self._require_unmodified_assets(
                 filesystem,
                 destination,
@@ -286,7 +333,7 @@ class SkillInstaller:
         }
         installed_version = self._installed_version()
         marker = {
-            "schema_version": 2,
+            "schema_version": _SKILL_MARKER_SCHEMA,
             "skill": SKILL_NAME,
             "platform": platform,
             "scope": "project" if project_scoped else "user-global",
@@ -301,6 +348,7 @@ class SkillInstaller:
             marker["npx_package"] = npx_package
         marker_content = (json.dumps(marker, indent=2, sort_keys=True) + "\n").encode("utf-8")
         journal = self._install_journal(
+            filesystem=filesystem,
             destination=destination,
             platform=platform,
             project_scoped=project_scoped,
@@ -340,29 +388,26 @@ class SkillInstaller:
             platform=platform,
             project_scoped=project_scoped,
         )
-        if (
-            recovered is not None
-            and recovered["action"] == "uninstall"
-            and not filesystem.exists(marker_path)
-        ):
-            return SkillInstallation(
-                destination=destination,
-                platform=platform,
-                project_scoped=project_scoped,
-                version=str(recovered["version"]),
-                runtime=str(recovered["runtime"]),
+        if recovered is not None:
+            self._raise_recovery_completed(
+                recovered,
+                destination,
+                requested_action="uninstall",
             )
         if not filesystem.exists(marker_path):
             raise AnchorError(f"No AnchorLoop skill installation is recorded at {destination}.")
 
         marker = self._read_marker(filesystem, marker_path)
-        recorded_platform = marker.get("platform")
-        if recorded_platform != platform:
-            raise AnchorError(f"Skill marker at {destination} is for platform '{recorded_platform}', not '{platform}'.")
-
-        paths = self._marker_files(marker, marker_path)
+        self._validate_marker_identity(
+            marker,
+            marker_path,
+            platform=platform,
+            project_scoped=project_scoped,
+        )
+        paths = self._marker_files(marker, marker_path, force=force)
         self._require_unmodified_assets(filesystem, destination, paths, force=force, operation="uninstall")
         journal = self._uninstall_journal(
+            filesystem=filesystem,
             destination=destination,
             platform=platform,
             project_scoped=project_scoped,
@@ -399,6 +444,12 @@ class SkillInstaller:
                 "recovery_pending": False,
             }
         marker = self._read_marker(filesystem, marker_path)
+        self._validate_marker_identity(
+            marker,
+            marker_path,
+            platform=platform,
+            project_scoped=project_scoped,
+        )
         integrity = "ok"
         bundle_current = False
         try:
@@ -444,16 +495,23 @@ class SkillInstaller:
         return filesystem, filesystem.path(".anchor", _INSTALL_JOURNAL_NAME)
 
     @staticmethod
-    def _encoded_file(relative_path: str, content: bytes) -> dict[str, str]:
+    def _encoded_file(
+        relative_path: str,
+        content: bytes,
+        *,
+        before: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
             "path": relative_path,
             "sha256": SkillInstaller._digest(content),
             "content_b64": base64.b64encode(content).decode("ascii"),
+            "before": before,
         }
 
     def _install_journal(
         self,
         *,
+        filesystem: SafeProjectFS,
         destination: Path,
         platform: str,
         project_scoped: bool,
@@ -472,16 +530,40 @@ class SkillInstaller:
             "version": version,
             "runtime": runtime,
             "writes": [
-                self._encoded_file(path.as_posix(), content)
+                self._encoded_file(
+                    path.as_posix(),
+                    content,
+                    before=self._path_state(
+                        filesystem,
+                        self._safe_child(filesystem, destination, path),
+                    ),
+                )
                 for path, content in asset_files
             ],
-            "deletes": sorted(obsolete_files),
-            "marker": self._encoded_file(_MARKER_NAME, marker_content),
+            "deletes": [
+                {
+                    "path": relative_name,
+                    "before": self._path_state(
+                        filesystem,
+                        self._safe_child(filesystem, destination, Path(relative_name)),
+                    ),
+                }
+                for relative_name in sorted(obsolete_files)
+            ],
+            "marker": self._encoded_file(
+                _MARKER_NAME,
+                marker_content,
+                before=self._path_state(
+                    filesystem,
+                    self._safe_child(filesystem, destination, Path(_MARKER_NAME)),
+                ),
+            ),
         }
 
-    @staticmethod
     def _uninstall_journal(
+        self,
         *,
+        filesystem: SafeProjectFS,
         destination: Path,
         platform: str,
         project_scoped: bool,
@@ -498,8 +580,27 @@ class SkillInstaller:
             "version": version,
             "runtime": runtime,
             "writes": [],
-            "deletes": sorted(owned_files, key=lambda value: value.count("/"), reverse=True),
-            "marker": None,
+            "deletes": [
+                {
+                    "path": relative_name,
+                    "before": self._path_state(
+                        filesystem,
+                        self._safe_child(filesystem, destination, Path(relative_name)),
+                    ),
+                }
+                for relative_name in sorted(
+                    owned_files,
+                    key=lambda value: value.count("/"),
+                    reverse=True,
+                )
+            ],
+            "marker": {
+                "path": _MARKER_NAME,
+                "before": self._path_state(
+                    filesystem,
+                    self._safe_child(filesystem, destination, Path(_MARKER_NAME)),
+                ),
+            },
         }
 
     def _commit_install_journal(
@@ -547,6 +648,19 @@ class SkillInstaller:
         self._apply_install_journal(filesystem, destination, journal)
         journal_filesystem.unlink(journal_path)
         return journal
+
+    @staticmethod
+    def _raise_recovery_completed(
+        journal: dict[str, Any],
+        destination: Path,
+        *,
+        requested_action: str,
+    ) -> NoReturn:
+        raise SkillRecoveryCompleted(
+            f"Recovered interrupted skill {journal['action']} at {destination}. "
+            f"No new {requested_action} was started. Inspect the destination, then rerun "
+            "the command if the requested change is still needed."
+        )
 
     def _pending_installation_status(
         self,
@@ -617,7 +731,11 @@ class SkillInstaller:
         journal: dict[str, Any],
         filesystem: SafeProjectFS,
         destination: Path,
-    ) -> tuple[list[tuple[Path, bytes]], list[Path], bytes | None]:
+    ) -> tuple[
+        list[tuple[Path, bytes, dict[str, Any]]],
+        list[tuple[Path, dict[str, Any]]],
+        tuple[Path, bytes | None, dict[str, Any]],
+    ]:
         if journal.get("schema_version") != _INSTALL_JOURNAL_SCHEMA:
             raise AnchorError("Skill recovery journal schema is unsupported.")
         action = journal.get("action")
@@ -635,32 +753,49 @@ class SkillInstaller:
         if not isinstance(raw_writes, list) or not isinstance(raw_deletes, list):
             raise AnchorError("Skill recovery journal operations are invalid.")
 
-        writes: list[tuple[Path, bytes]] = []
+        writes: list[tuple[Path, bytes, dict[str, Any]]] = []
         write_names: set[str] = set()
         for entry in raw_writes:
-            relative_path, content = self._decode_journal_file(entry, filesystem, destination)
+            relative_path, content, before = self._decode_journal_file(
+                entry,
+                filesystem,
+                destination,
+            )
             name = relative_path.as_posix()
             if name == _MARKER_NAME or name in write_names:
                 raise AnchorError("Skill recovery journal contains duplicate or reserved writes.")
             write_names.add(name)
-            writes.append((relative_path, content))
+            writes.append((relative_path, content, before))
 
-        deletes: list[Path] = []
+        deletes: list[tuple[Path, dict[str, Any]]] = []
         delete_names: set[str] = set()
-        for value in raw_deletes:
-            if not isinstance(value, str):
+        for entry in raw_deletes:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                 raise AnchorError("Skill recovery journal delete path is invalid.")
-            relative_path = self._journal_relative_path(value, filesystem, destination)
+            relative_path = self._journal_relative_path(entry["path"], filesystem, destination)
+            before = self._decode_before_state(entry.get("before"))
             name = relative_path.as_posix()
             if name == _MARKER_NAME or name in delete_names or name in write_names:
                 raise AnchorError("Skill recovery journal contains duplicate or conflicting deletes.")
             delete_names.add(name)
-            deletes.append(relative_path)
+            deletes.append((relative_path, before))
+
+        if not delete_names.issubset(_SKILL_OWNED_PATHS):
+            raise AnchorError("Skill recovery journal contains a delete outside owned assets.")
+        if action == "install" and write_names != _SKILL_OWNED_PATHS:
+            raise AnchorError("Skill install recovery journal does not contain the canonical asset bundle.")
+        if action == "uninstall" and write_names:
+            raise AnchorError("Skill uninstall recovery journal contains writes.")
+        if action == "uninstall" and delete_names != _SKILL_OWNED_PATHS:
+            raise AnchorError("Skill uninstall recovery journal does not contain the canonical asset bundle.")
 
         raw_marker = journal.get("marker")
-        marker_content: bytes | None
         if action == "install":
-            marker_path, marker_content = self._decode_journal_file(raw_marker, filesystem, destination)
+            marker_path, marker_content, marker_before = self._decode_journal_file(
+                raw_marker,
+                filesystem,
+                destination,
+            )
             if marker_path.as_posix() != _MARKER_NAME:
                 raise AnchorError("Skill recovery journal marker path is invalid.")
             try:
@@ -669,6 +804,12 @@ class SkillInstaller:
                 raise AnchorError("Skill recovery journal marker content is invalid.") from error
             if not isinstance(marker, dict) or marker.get("skill") != SKILL_NAME:
                 raise AnchorError("Skill recovery journal marker content is invalid.")
+            self._validate_marker_identity(
+                marker,
+                destination / _MARKER_NAME,
+                platform=str(journal["platform"]),
+                project_scoped=bool(journal["project_scoped"]),
+            )
             expected_scope = "project" if journal["project_scoped"] else "user-global"
             if (
                 marker.get("platform") != journal["platform"]
@@ -680,23 +821,30 @@ class SkillInstaller:
             marker_files = self._marker_files(marker, destination / _MARKER_NAME)
             expected_files = {
                 relative_path.as_posix(): self._digest(content)
-                for relative_path, content in writes
+                for relative_path, content, _ in writes
             }
             if marker_files != expected_files:
                 raise AnchorError("Skill recovery journal marker does not match its writes.")
         else:
-            if raw_marker is not None or writes:
-                raise AnchorError("Skill uninstall recovery journal contains writes.")
+            if not isinstance(raw_marker, dict):
+                raise AnchorError("Skill uninstall recovery journal marker is invalid.")
+            marker_name = raw_marker.get("path")
+            if not isinstance(marker_name, str):
+                raise AnchorError("Skill recovery journal marker path is invalid.")
+            marker_path = self._journal_relative_path(marker_name, filesystem, destination)
+            if marker_path.as_posix() != _MARKER_NAME:
+                raise AnchorError("Skill recovery journal marker path is invalid.")
+            marker_before = self._decode_before_state(raw_marker.get("before"))
             marker_content = None
 
-        return writes, deletes, marker_content
+        return writes, deletes, (marker_path, marker_content, marker_before)
 
     def _decode_journal_file(
         self,
         entry: Any,
         filesystem: SafeProjectFS,
         destination: Path,
-    ) -> tuple[Path, bytes]:
+    ) -> tuple[Path, bytes, dict[str, Any]]:
         if not isinstance(entry, dict):
             raise AnchorError("Skill recovery journal file entry is invalid.")
         name = entry.get("path")
@@ -711,7 +859,30 @@ class SkillInstaller:
             raise AnchorError("Skill recovery journal contains invalid encoded content.") from error
         if self._digest(content) != digest:
             raise AnchorError("Skill recovery journal content digest is invalid.")
-        return relative_path, content
+        before = self._decode_before_state(entry.get("before"))
+        return relative_path, content, before
+
+    @staticmethod
+    def _decode_before_state(value: Any) -> dict[str, Any]:
+        if value == {"kind": "missing"}:
+            return value
+        if not isinstance(value, dict) or value.get("kind") != "file":
+            raise AnchorError("Skill recovery journal before-state is invalid.")
+        digest = value.get("sha256")
+        identity = value.get("identity")
+        identity_keys = {"device", "inode", "mode", "size", "mtime_ns", "ctime_ns"}
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            or not isinstance(identity, dict)
+            or set(identity) != identity_keys
+            or any(
+                not isinstance(identity[key], int) or isinstance(identity[key], bool)
+                for key in identity_keys
+            )
+        ):
+            raise AnchorError("Skill recovery journal before-state is invalid.")
+        return value
 
     def _journal_relative_path(
         self,
@@ -733,33 +904,138 @@ class SkillInstaller:
         destination: Path,
         journal: dict[str, Any],
     ) -> None:
-        writes, deletes, marker_content = self._decode_install_journal(journal, filesystem, destination)
-        marker_path = self._safe_child(filesystem, destination, Path(_MARKER_NAME))
+        writes, deletes, marker = self._decode_install_journal(journal, filesystem, destination)
+        marker_relative_path, marker_content, marker_before = marker
+        marker_path = self._safe_child(filesystem, destination, marker_relative_path)
 
-        for relative_path, content in writes:
+        pending_writes: list[tuple[Path, bytes, dict[str, Any]]] = []
+        for relative_path, content, before in writes:
             target = self._safe_child(filesystem, destination, relative_path)
+            if self._write_requires_apply(filesystem, target, content, before):
+                pending_writes.append((target, content, before))
+
+        pending_deletes: list[tuple[Path, dict[str, Any]]] = []
+        for relative_path, before in deletes:
+            target = self._safe_child(filesystem, destination, relative_path)
+            if self._delete_requires_apply(filesystem, target, before):
+                pending_deletes.append((target, before))
+
+        if journal["action"] == "install":
+            assert marker_content is not None
+            marker_pending = self._write_requires_apply(
+                filesystem,
+                marker_path,
+                marker_content,
+                marker_before,
+            )
+        else:
+            marker_pending = self._delete_requires_apply(filesystem, marker_path, marker_before)
+
+        for target, content, before in pending_writes:
+            self._require_before_state(filesystem, target, before)
             self._write_bytes(filesystem, target, content)
 
-        for relative_path in deletes:
-            target = self._safe_child(filesystem, destination, relative_path)
-            if filesystem.exists(target):
-                if not filesystem.is_file(target):
-                    raise AnchorError(f"Managed skill asset must be a regular file: {target}")
-                filesystem.unlink(target)
+        for target, before in pending_deletes:
+            self._require_before_state(filesystem, target, before)
+            filesystem.unlink(target)
             filesystem.remove_empty_parents(target.parent, destination)
 
         if journal["action"] == "install":
             assert marker_content is not None
             # The marker is the commit record and is deliberately written only
             # after every owned asset matches the journaled bundle.
-            self._write_bytes(filesystem, marker_path, marker_content)
+            if marker_pending:
+                self._require_before_state(filesystem, marker_path, marker_before)
+                self._write_bytes(filesystem, marker_path, marker_content)
             return
 
         # During uninstall the old marker remains until all owned assets have
         # been removed, so an interrupted operation is never mistaken for a
         # completed removal.
-        filesystem.unlink(marker_path, missing_ok=True)
+        if marker_pending:
+            self._require_before_state(filesystem, marker_path, marker_before)
+            filesystem.unlink(marker_path)
         filesystem.remove_empty_parents(destination, filesystem.root)
+
+    def _path_state(self, filesystem: SafeProjectFS, path: Path) -> dict[str, Any]:
+        candidate = filesystem.validate(path)
+        try:
+            metadata = os.lstat(candidate)
+        except FileNotFoundError:
+            return {"kind": "missing"}
+        except OSError as error:
+            raise AnchorError(f"Cannot inspect managed skill asset: {candidate}") from error
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AnchorError(f"Managed skill asset must be a regular file: {candidate}")
+
+        identity = self._file_identity(metadata)
+        content = filesystem.read_bytes(candidate)
+        try:
+            after_read = os.lstat(candidate)
+        except OSError as error:
+            raise AnchorError(f"Managed skill asset changed while it was inspected: {candidate}") from error
+        if self._file_identity(after_read) != identity:
+            raise AnchorError(f"Managed skill asset changed while it was inspected: {candidate}")
+        return {
+            "kind": "file",
+            "sha256": self._digest(content),
+            "identity": identity,
+        }
+
+    @staticmethod
+    def _file_identity(metadata: os.stat_result) -> dict[str, int]:
+        return {
+            "device": int(metadata.st_dev),
+            "inode": int(metadata.st_ino),
+            "mode": int(stat.S_IMODE(metadata.st_mode)),
+            "size": int(metadata.st_size),
+            "mtime_ns": int(metadata.st_mtime_ns),
+            "ctime_ns": int(metadata.st_ctime_ns),
+        }
+
+    def _write_requires_apply(
+        self,
+        filesystem: SafeProjectFS,
+        target: Path,
+        content: bytes,
+        before: dict[str, Any],
+    ) -> bool:
+        current = self._path_state(filesystem, target)
+        if current.get("kind") == "file" and current.get("sha256") == self._digest(content):
+            return False
+        if current == before:
+            return True
+        self._raise_recovery_conflict(target)
+
+    def _delete_requires_apply(
+        self,
+        filesystem: SafeProjectFS,
+        target: Path,
+        before: dict[str, Any],
+    ) -> bool:
+        current = self._path_state(filesystem, target)
+        if current == {"kind": "missing"}:
+            return False
+        if current == before:
+            return True
+        self._raise_recovery_conflict(target)
+
+    def _require_before_state(
+        self,
+        filesystem: SafeProjectFS,
+        target: Path,
+        before: dict[str, Any],
+    ) -> None:
+        if self._path_state(filesystem, target) != before:
+            self._raise_recovery_conflict(target)
+
+    @staticmethod
+    def _raise_recovery_conflict(target: Path) -> None:
+        raise AnchorError(
+            f"Refusing interrupted skill recovery because {target} changed after the operation "
+            "was journaled. The user-authored file was left unchanged; inspect it before "
+            "resolving the retained recovery journal."
+        )
 
     @staticmethod
     def _validate_platform(platform: str) -> None:
@@ -837,7 +1113,37 @@ class SkillInstaller:
         return data
 
     @staticmethod
-    def _marker_files(marker: dict[str, Any], marker_path: Path) -> dict[str, str | None]:
+    def _validate_marker_identity(
+        marker: dict[str, Any],
+        marker_path: Path,
+        *,
+        platform: str,
+        project_scoped: bool,
+    ) -> None:
+        expected_scope = "project" if project_scoped else "user-global"
+        if marker.get("schema_version") != _SKILL_MARKER_SCHEMA:
+            raise AnchorError(f"AnchorLoop skill marker at {marker_path} has an unsupported schema.")
+        if marker.get("platform") != platform or marker.get("scope") != expected_scope:
+            raise AnchorError(f"AnchorLoop skill marker at {marker_path} is for a different destination.")
+        version = marker.get("version")
+        runtime = marker.get("runtime", SKILL_RUNTIME_ANCHOR)
+        npx_package = marker.get("npx_package")
+        if (
+            not isinstance(version, str)
+            or not version.strip()
+            or not isinstance(runtime, str)
+            or (npx_package is not None and not isinstance(npx_package, str))
+        ):
+            raise AnchorError(f"AnchorLoop skill marker at {marker_path} has invalid metadata.")
+        SkillInstaller._validate_runtime(runtime, npx_package)
+
+    @staticmethod
+    def _marker_files(
+        marker: dict[str, Any],
+        marker_path: Path,
+        *,
+        force: bool = False,
+    ) -> dict[str, str | None]:
         paths = marker.get("files")
         if not isinstance(paths, list):
             raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
@@ -845,15 +1151,51 @@ class SkillInstaller:
         result: dict[str, str | None] = {}
         for entry in paths:
             if isinstance(entry, str):
-                result[entry] = None
-                continue
-            if not isinstance(entry, dict):
+                path = entry
+                digest: str | None = None
+                if not force:
+                    raise AnchorError(
+                        f"AnchorLoop skill marker at {marker_path} has legacy entries; rerun with --force."
+                    )
+            elif isinstance(entry, dict):
+                path = entry.get("path")
+                digest = entry.get("sha256")
+                if not isinstance(path, str) or not isinstance(digest, str):
+                    raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
+                if _SKILL_SHA256_PATTERN.fullmatch(digest) is None:
+                    raise AnchorError(f"AnchorLoop skill marker at {marker_path} has an invalid digest.")
+            else:
                 raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
-            path = entry.get("path")
-            digest = entry.get("sha256")
-            if not isinstance(path, str) or not isinstance(digest, str):
+
+            relative = Path(path)
+            if (
+                not path
+                or "\\" in path
+                or relative.is_absolute()
+                or relative.drive
+                or relative.root
+                or any(part in {"", ".", ".."} for part in relative.parts)
+                or relative.as_posix() != path
+            ):
                 raise AnchorError(f"AnchorLoop skill marker at {marker_path} is invalid.")
+            if path in result:
+                raise AnchorError(f"AnchorLoop skill marker at {marker_path} contains duplicate paths.")
             result[path] = digest
+
+        unknown = sorted(set(result) - _SKILL_OWNED_PATHS)
+        missing = sorted(_SKILL_OWNED_PATHS - set(result))
+        if not force and (unknown or missing):
+            details: list[str] = []
+            if unknown:
+                details.append(f"unknown owned paths: {', '.join(unknown)}")
+            if missing:
+                details.append(f"missing owned paths: {', '.join(missing)}")
+            raise AnchorError(
+                f"AnchorLoop skill marker at {marker_path} does not match the canonical bundle "
+                f"({'; '.join(details)})."
+            )
+        if force:
+            return {path: result.get(path) for path in sorted(_SKILL_OWNED_PATHS)}
         return result
 
     def _require_unmodified_assets(

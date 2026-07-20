@@ -20,7 +20,14 @@ class SafeProjectFS:
     """
 
     def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
+        # Keep the spelling selected by the caller as well as the resolved
+        # boundary.  Windows can expose the same directory through an 8.3
+        # alias (for example RUNNER~1) while ``resolve()`` returns its long
+        # name.  Callers may retain that original spelling when constructing
+        # descendants, so validate their lexical suffix against either known
+        # spelling and always operate beneath the resolved boundary.
+        self._selected_root = Path(os.path.abspath(root))
+        self.root = self._selected_root.resolve()
 
     def path(self, *parts: str | Path) -> Path:
         candidate = self.root
@@ -39,12 +46,15 @@ class SafeProjectFS:
             if candidate.drive or candidate.root:
                 raise AnchorError("Managed path escapes the project root.")
             candidate = self.root / candidate
-        try:
-            relative = candidate.relative_to(self.root)
-        except ValueError as error:
-            raise AnchorError("Managed path escapes the project root.") from error
+        relative = self._relative_to_root(candidate)
         if ".." in relative.parts:
             raise AnchorError("Managed path escapes the project root.")
+
+        # Rebase descendants supplied through the selected spelling onto the
+        # immutable resolved boundary.  This does not dereference descendant
+        # links; _validate_existing_components() still rejects every symlink
+        # or reparse-point below the boundary before any managed operation.
+        candidate = self.root / relative
 
         self._validate_existing_components(relative)
         try:
@@ -56,6 +66,14 @@ class SafeProjectFS:
         if require_exists and self._lstat(candidate) is None:
             raise AnchorError(f"Managed path does not exist: {candidate}")
         return candidate
+
+    def _relative_to_root(self, candidate: Path) -> Path:
+        for root in (self.root, self._selected_root):
+            try:
+                return candidate.relative_to(root)
+            except ValueError:
+                continue
+        raise AnchorError("Managed path escapes the project root.")
 
     def exists(self, path: Path) -> bool:
         candidate = self.validate(path)

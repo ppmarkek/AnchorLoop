@@ -8,6 +8,7 @@ from pathlib import Path
 from anchorloop.cli import main
 from anchorloop.project import AnchorError, AnchorProject
 from anchorloop.skill_install import SkillInstaller
+from tests.git_fixture import init_git_repository
 
 
 def _run(root: Path, *arguments: str) -> int:
@@ -42,6 +43,7 @@ def _plan(root: Path, summary: str) -> int:
 
 
 def _approved_task(root: Path) -> None:
+    init_git_repository(root)
     assert _run(root, "add", "--apply") == 0
     assert _run(root, "start", "Protect workflow integrity") == 0
     assert (

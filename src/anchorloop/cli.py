@@ -736,6 +736,19 @@ def _apply_skill_installations(
     failures: list[tuple[str, AnchorError]] = []
     for platform in platforms:
         try:
+            installer.recover_pending(
+                platform=platform,
+                project_scoped=project_scoped,
+                requested_action="install",
+            )
+        except AnchorError as error:
+            failures.append((platform, error))
+    if failures:
+        _print_skill_install_results(installations, failures)
+        return 2
+
+    for platform in platforms:
+        try:
             installations.append(
                 installer.install(
                     platform=platform,
@@ -761,6 +774,19 @@ def _apply_skill_uninstallations(
 ) -> int:
     installations = []
     failures: list[tuple[str, AnchorError]] = []
+    for platform in platforms:
+        try:
+            installer.recover_pending(
+                platform=platform,
+                project_scoped=project_scoped,
+                requested_action="uninstall",
+            )
+        except AnchorError as error:
+            failures.append((platform, error))
+    if failures:
+        _print_skill_uninstall_results(installations, failures)
+        return 2
+
     for platform in platforms:
         try:
             installations.append(
@@ -953,7 +979,10 @@ def _print_experiment_report(
         "agent_provider",
         "agent_model",
         "delayed_recall_score",
+        "delayed_recall_integrity",
         "outcome_observations",
+        "latest_outcome_integrity",
+        "legacy_unverified_observations",
         "defects_found",
         "rollback",
         "corrective_refactor",

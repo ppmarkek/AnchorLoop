@@ -34,19 +34,56 @@ function readCanonicalVersion(root = repositoryRoot) {
   return match[1];
 }
 
+function assertBundledVersionConsistency(options = {}) {
+  const root = options.root || repositoryRoot;
+  const version = readCanonicalVersion(root);
+  const packagePath = path.join(root, "package.json");
+  const packageMetadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  const packageName = assertPackageName(packageMetadata.name);
+  if (packageMetadata.version !== version) {
+    throw new Error(
+      `package.json version ${packageMetadata.version} does not match canonical version ${version}.`,
+    );
+  }
+
+  if (packageMetadata.dependencies?.[packageName]) {
+    throw new Error("AnchorLoop must not depend on itself.");
+  }
+
+  return { packageName, version };
+}
+
 function assertVersionConsistency(options = {}) {
   const root = options.root || repositoryRoot;
   const releaseTag = options.releaseTag === undefined
     ? process.env.ANCHORLOOP_RELEASE_TAG
     : options.releaseTag;
-  const version = readCanonicalVersion(root);
-  const packagePath = path.join(root, "package.json");
-  const packageMetadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-  assertPackageName(packageMetadata.name);
-  if (packageMetadata.version !== version) {
-    throw new Error(
-      `package.json version ${packageMetadata.version} does not match canonical version ${version}.`,
-    );
+  const { packageName, version } = assertBundledVersionConsistency({ root });
+
+  const lockPath = path.join(root, "package-lock.json");
+  const packageLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  if (
+    packageLock.version !== version
+    || packageLock.packages?.[""]?.version !== version
+  ) {
+    throw new Error("package-lock.json version does not match the canonical version.");
+  }
+  if (
+    packageLock.packages?.["node_modules/anchorloop"]
+    || packageLock.packages?.[""]?.dependencies?.anchorloop
+  ) {
+    throw new Error("package-lock.json contains a recursive AnchorLoop dependency.");
+  }
+
+  const generatedSkillMarker = path.join(
+    root,
+    ".codex",
+    "skills",
+    "anchorloop",
+    ".anchorloop-skill.json",
+  );
+  if (fs.existsSync(generatedSkillMarker)) {
+    throw new Error("The generated local AnchorLoop skill must not be present in a release checkout.");
   }
 
   const pyprojectPath = path.join(root, "pyproject.toml");
@@ -64,7 +101,7 @@ function assertVersionConsistency(options = {}) {
   if (releaseTag && releaseTag !== `v${version}`) {
     throw new Error(`Release tag ${releaseTag} does not match canonical version v${version}.`);
   }
-  return { packageName: packageMetadata.name, version };
+  return { packageName, version };
 }
 
 function main() {
@@ -83,6 +120,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertBundledVersionConsistency,
   assertPackageName,
   assertVersionConsistency,
   readCanonicalVersion,

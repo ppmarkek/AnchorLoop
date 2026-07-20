@@ -2,6 +2,11 @@
 
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
+> - **公開済み production:** `anchorloop@0.1.0`
+> - **未公開の release candidate:** `0.2.0`
+> - `0.2.0` が公開されるまでは production で
+>   `npx --yes anchorloop@0.1.0 ...` を使用してください。[移行ガイド](../MIGRATION_0.2.md)。
+
 AnchorLoop は、AI コーディングエージェントのためのローカル workflow です。エンジニアはタスク、ルール、プロジェクト構造、最終受け入れの管理を維持します。
 
 原則: AI はコードを書けますが、自分の計画を承認したり、新しいルールを有効化したり、スキルを選択したり、タスクを完了したりできません。

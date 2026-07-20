@@ -15,3 +15,6 @@ npm-debug.log*
 /.anchor/cache/
 /.npm/
 /.npm-cache/
+
+# Local AnchorLoop dogfooding installation
+/.codex/skills/anchorloop/

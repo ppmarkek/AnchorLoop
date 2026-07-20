@@ -12,6 +12,7 @@ from unittest import mock
 
 from anchorloop.cli import main
 from anchorloop.quality import workspace_fingerprint
+from tests.git_fixture import init_git_repository
 
 
 def record_brief(root: Path) -> int:
@@ -37,6 +38,7 @@ def record_brief(root: Path) -> int:
 
 
 def record_plan(root: Path, summary: str) -> int:
+    init_git_repository(root)
     return main(
         [
             "plan",
@@ -516,7 +518,7 @@ class AnchorCliTests(unittest.TestCase):
             task = json.loads((root / ".anchor" / "tasks" / "active.json").read_text())
             self.assertEqual(task["state"], "verified")
 
-    def test_git_commit_does_not_invalidate_identical_materialized_tree(self) -> None:
+    def test_git_commit_invalidates_quality_even_when_worktree_is_identical(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tracked = root / "tracked.py"
@@ -567,15 +569,16 @@ class AnchorCliTests(unittest.TestCase):
                         "--reason",
                         "The checked content is unchanged by the commit.",
                         "--recall",
-                        "A metadata-only commit does not change the checked files.",
+                        "A commit changes the authoritative Git snapshot.",
                         "--path",
                         str(root),
                     ]
                 ),
-                0,
+                2,
             )
             after = json.loads((root / ".anchor" / "tasks" / "active.json").read_text())
-            self.assertEqual(after["state"], "verified")
+            self.assertEqual(after["state"], "review_ready")
+            self.assertIn("quality_invalidations", after)
             self.assertEqual(before["digest"], before["content_digest"])
 
     def test_git_submodule_worktree_changes_invalidate_materialized_fingerprint(self) -> None:
@@ -1042,8 +1045,13 @@ class AnchorCliTests(unittest.TestCase):
                 }
             )
             marker_path.write_text(json.dumps(marker), encoding="utf-8")
-            self.assertEqual(main(["install", "--project", "--apply", "--path", str(root)]), 0)
-            self.assertFalse(legacy_asset.exists())
+            self.assertEqual(main(["install", "--project", "--apply", "--path", str(root)]), 2)
+            self.assertTrue(legacy_asset.exists())
+            self.assertEqual(
+                main(["install", "--project", "--apply", "--force", "--path", str(root)]),
+                0,
+            )
+            self.assertTrue(legacy_asset.exists())
 
             note = destination / "user-note.txt"
             note.write_text("keep me\n", encoding="utf-8")

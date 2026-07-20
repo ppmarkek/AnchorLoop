@@ -11,6 +11,7 @@ from unittest import mock
 
 from anchorloop.cli import main
 from anchorloop.project import AnchorError, AnchorProject
+from tests.git_fixture import init_git_repository
 
 
 def _brief(root: Path) -> None:
@@ -38,6 +39,7 @@ def _brief(root: Path) -> None:
 
 
 def _structured_plan(root: Path, *, mode: str = "STANDARD") -> list[str]:
+    init_git_repository(root)
     return [
         "plan",
         "--summary",
@@ -186,6 +188,70 @@ class HumanOwnershipTests(unittest.TestCase):
             self.assertEqual(report["tasks"][0]["agent_provider"], "openai")
             self.assertEqual(report["tasks"][0]["defects_found"], 1)
             self.assertTrue(report["tasks"][0]["corrective_refactor"])
+
+            closed_path = root / ".anchor" / "tasks" / "closed" / f"{task_id}.json"
+            closed = json.loads(closed_path.read_text(encoding="utf-8"))
+            self.assertIn("subject_digest", closed["verification"])
+            for label, path, value in (
+                (
+                    "verification reason",
+                    ("verification", "reason"),
+                    "Forged verification evidence.",
+                ),
+                ("verification engineer", ("verification", "by"), "Mallory"),
+                (
+                    "verification time",
+                    ("verification", "at"),
+                    "2035-01-01T00:00:00+00:00",
+                ),
+                ("approval engineer", ("approval", "by"), "Mallory"),
+                (
+                    "approval time",
+                    ("approval", "at"),
+                    "2035-01-01T00:00:00+00:00",
+                ),
+                ("reported metric value", ("metrics", "input_tokens"), 1201),
+                ("reported metric type", ("metrics", "input_tokens"), "1200"),
+                ("close duration", ("metrics", "wall_seconds"), 999999.0),
+                (
+                    "task creation time",
+                    ("created_at",),
+                    "2035-01-01T00:00:00+00:00",
+                ),
+            ):
+                with self.subTest(label=label):
+                    forged = json.loads(json.dumps(closed))
+                    if len(path) == 1:
+                        forged[path[0]] = value
+                    else:
+                        forged[path[0]][path[1]] = value
+                    closed_path.write_text(json.dumps(forged), encoding="utf-8")
+                    with self.assertRaisesRegex(AnchorError, "Closed task record is inconsistent"):
+                        AnchorProject.at(root).experiment_report()
+            forged = json.loads(json.dumps(closed))
+            forged["verification"].update(
+                {
+                    "provenance": "interactive-tty",
+                    "confirmation": "typed",
+                    "confirmed_subject_digest": forged["verification"]["subject_digest"],
+                }
+            )
+            closed_path.write_text(json.dumps(forged), encoding="utf-8")
+            with self.assertRaisesRegex(AnchorError, "Closed task record is inconsistent"):
+                AnchorProject.at(root).experiment_report()
+            doctor = AnchorProject.at(root).doctor(strict=True)
+            self.assertTrue(
+                any(
+                    check["name"] == "closed-task-integrity" and check["status"] == "failed"
+                    for check in doctor["checks"]
+                )
+            )
+            stripped = json.loads(json.dumps(closed))
+            stripped["verification"].pop("subject_digest")
+            closed_path.write_text(json.dumps(stripped), encoding="utf-8")
+            with self.assertRaisesRegex(AnchorError, "verification subject digest"):
+                AnchorProject.at(root).experiment_report()
+            closed_path.write_text(json.dumps(closed), encoding="utf-8")
 
             csv_output = io.StringIO()
             with redirect_stdout(csv_output):

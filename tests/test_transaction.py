@@ -20,6 +20,7 @@ from anchorloop.transaction import (
     TransactionRecoveryRequired,
     _digest,
 )
+from tests.git_fixture import init_git_repository
 
 
 class _FailAfterFirstOperation(TransactionManager):
@@ -52,6 +53,7 @@ def _crash_between_state_and_event(root: str) -> None:
 
 
 def _review_ready_project(root: Path) -> AnchorProject:
+    init_git_repository(root)
     project = AnchorProject.at(root)
     project.apply_setup("add")
     project.start_task("Serialize workflow commands")

@@ -6,17 +6,38 @@ engine and it never becomes the source of truth for task state.
 
 ## Install
 
-For Node.js 18+ and Python 3.11+, the npm shortcut is the fastest route:
+Published production is `anchorloop@0.1.0`. The current release branch is the
+unreleased `0.2.0` release candidate; its guided multi-agent installer is not
+available from npm `latest` until the signed tag, staging, approval, registry
+smoke, and interactive promotion sequence succeeds.
+
+For production use, pin the published package explicitly:
 
 ~~~powershell
-npx anchorloop install
+npx --yes anchorloop@0.1.0 install --project --platform codex --apply
 ~~~
 
-In an interactive terminal this opens a guided installer: choose the current
-project or your user profile; user-global setup then offers Codex, Cursor,
-Gemini CLI, Claude Code, OpenCode, the cross-framework Agent Skills standard,
-or all native agent locations. The installer shows every destination and asks for a
-final confirmation before it writes files.
+To exercise the `0.2.0` candidate from a checkout, install the current source
+and open the guided installer locally:
+
+~~~powershell
+python -m pip install -e .
+anchor install --interactive
+~~~
+
+In an interactive terminal choose the current project or your user profile;
+user-global setup then offers Codex, Cursor, Gemini CLI, Claude Code, OpenCode,
+the cross-framework Agent Skills standard, or all native agent locations. The
+installer shows every destination and asks for final confirmation before it
+writes files.
+
+## Compatibility status
+
+| Capability | Status | Evidence and boundary |
+|---|---|---|
+| Filesystem destination/install matrix for `agents`, `codex`, `cursor`, `gemini`, `claude`, and `opencode` | **Verified** | Automated tests verify exact placement, owned assets, update, and uninstall behavior. This does not verify any host. |
+| Real-host skill discovery for every named host | **Experimental** | Each host must be opened and tested against its current release before discovery can be claimed. No host is marked Verified from filesystem placement alone. |
+| Native adapters, hooks, MCP, and other undiscovered host integrations | **Planned** | These remain separate opt-in integrations and are not part of the `0.2.0` release-candidate scope. |
 
 Project setup uses `.agents/skills/anchorloop/`. Global setup writes the
 selected host's native directory, such as `~/.codex/skills/anchorloop/` or
@@ -27,14 +48,18 @@ source, so it can execute later AnchorLoop commands without a globally
 installed `anchor` executable. It never writes `node_modules`, a Python bytecode
 cache, or a workflow cache into the project.
 
-For repeatable scripts, choose scope and destination explicitly:
+For repeatable development scripts, choose scope and destination explicitly:
 
 ~~~powershell
-npx anchorloop install --project --platform codex
-npx anchorloop install --global --platform gemini
-npx anchorloop install --global --all
-npx anchorloop install --global --all --preview
+anchor install --project --platform codex --apply
+anchor install --global --platform gemini --apply
+anchor install --global --all --apply
+anchor install --global --all
 ~~~
+
+After `0.2.0` is published and its registry smoke passes, automation may use
+the exact-version runner `npx --yes anchorloop@0.2.0 ...`. Keep release and
+automation commands pinned even after npm `latest` moves.
 
 For a project-scoped installation, AnchorLoop rejects symlink and Windows
 reparse-point components in `.codex/`, `.agents/`, `skills/`, and the skill
@@ -74,9 +99,11 @@ replaced or removed.
 Install, update, and uninstall are serialized per destination and use a durable
 journal outside the project. The marker is committed last. If a process stops
 between asset writes, the next mutating installer command rolls the exact
-operation forward before proceeding; read-only status reports
-`recovery_pending` without changing files. A successful operation removes its
-journal and does not leave a cache in the repository.
+operation forward and then stops without starting the newly requested
+mutation. Inspect the destination and rerun explicitly if it is still needed;
+the read-only installer status API reports `recovery_pending` without changing
+files. A successful operation removes its journal and does not leave a cache in
+the repository.
 
 Uninstall removes only unchanged installer-owned files:
 
@@ -102,6 +129,9 @@ An old approved rule without an approval-time digest is treated as
 migration-required, not silently trusted. The engineer must propose and
 approve a replacement in the same category, then record an explicit
 `anchor rules supersede <old> <new> --by <engineer> --reason <text>` action.
+
+For the complete package and project upgrade sequence, see
+[Migration from 0.1.0 to 0.2.0](MIGRATION_0.2.md).
 
 ## Workflow contract
 

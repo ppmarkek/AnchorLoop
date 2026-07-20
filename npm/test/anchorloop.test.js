@@ -11,6 +11,7 @@ const repositoryRoot = path.resolve(__dirname, "..", "..");
 const launcher = path.join(repositoryRoot, "npm", "bin", "anchorloop.js");
 const packageMetadata = require(path.join(repositoryRoot, "package.json"));
 const { readCanonicalVersion } = require(path.join(repositoryRoot, "npm", "scripts", "version.js"));
+const { buildGlobalPlatformPlan } = require(path.join(repositoryRoot, "npm", "scripts", "registry-smoke.js"));
 const { parseShortcutOptions, shouldOpenGuidedInstaller } = require(launcher);
 
 function runLauncher(args, cwd) {
@@ -21,6 +22,38 @@ function runLauncher(args, cwd) {
     windowsHide: true,
   });
 }
+
+test("registry smoke isolates all six global platform destinations", () => {
+  const workspace = path.join("release-smoke", "workspace");
+  const plan = buildGlobalPlatformPlan(workspace);
+
+  assert.deepEqual(plan.map(({ platform }) => platform), [
+    "agents",
+    "codex",
+    "cursor",
+    "gemini",
+    "claude",
+    "opencode",
+  ]);
+  assert.deepEqual(
+    plan.map(({ platform, home, project, destination }) => ({
+      platform,
+      home: path.relative(workspace, home).split(path.sep).join("/"),
+      project: path.relative(workspace, project).split(path.sep).join("/"),
+      destination: path.relative(home, destination).split(path.sep).join("/"),
+    })),
+    [
+      { platform: "agents", home: "home-agents", project: "project-agents", destination: ".agents/skills/anchorloop" },
+      { platform: "codex", home: "home-codex", project: "project-codex", destination: ".codex/skills/anchorloop" },
+      { platform: "cursor", home: "home-cursor", project: "project-cursor", destination: ".cursor/skills/anchorloop" },
+      { platform: "gemini", home: "home-gemini", project: "project-gemini", destination: ".gemini/skills/anchorloop" },
+      { platform: "claude", home: "home-claude", project: "project-claude", destination: ".claude/skills/anchorloop" },
+      { platform: "opencode", home: "home-opencode", project: "project-opencode", destination: ".config/opencode/skills/anchorloop" },
+    ],
+  );
+  assert.equal(new Set(plan.map(({ home }) => home)).size, plan.length);
+  assert.equal(new Set(plan.map(({ project }) => project)).size, plan.length);
+});
 
 test("the shortcut installs a Codex skill that keeps an npx command runner", () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anchorloop-npx-"));
@@ -163,10 +196,114 @@ test("the package manifest allowlists the runner and its Python skill assets", (
   const readme = fs.readFileSync(path.join(repositoryRoot, "README.md"), "utf8");
   assert.match(
     readme,
-    /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-delivery-loop\.svg/,
+    /src="docs\/assets\/anchorloop-delivery-loop\.svg"/,
   );
   assert.match(
     readme,
-    /https:\/\/raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\/docs\/assets\/anchorloop-evidence-integrity\.svg/,
+    /src="docs\/assets\/anchorloop-evidence-integrity\.svg"/,
   );
+  assert.doesNotMatch(readme, /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\//);
+});
+
+test("the actual npm tarball contains only release runtime and documentation files", { timeout: 60_000 }, () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "anchorloop-pack-"));
+  const npmCache = path.join(temporaryRoot, "npm-cache");
+  try {
+    const npmArguments = ["pack", "--pack-destination", temporaryRoot, "--json"];
+    const npmExecutable = process.env.npm_execpath;
+    const pack = npmExecutable
+      ? spawnSync(process.execPath, [npmExecutable, ...npmArguments], {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          shell: false,
+          windowsHide: true,
+          env: { ...process.env, npm_config_cache: npmCache },
+        })
+      : spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", npmArguments, {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          shell: process.platform === "win32",
+          windowsHide: true,
+          env: { ...process.env, npm_config_cache: npmCache },
+        });
+    assert.equal(pack.status, 0, `${pack.stdout}\n${pack.stderr}`);
+    const jsonStart = pack.stdout.indexOf("[");
+    const jsonEnd = pack.stdout.lastIndexOf("]");
+    assert(jsonStart >= 0 && jsonEnd > jsonStart, `npm pack did not return JSON:\n${pack.stdout}`);
+    const metadata = JSON.parse(pack.stdout.slice(jsonStart, jsonEnd + 1));
+    assert.equal(metadata.length, 1, "npm pack must create exactly one archive");
+    const archives = fs.readdirSync(temporaryRoot).filter((name) => name.endsWith(".tgz"));
+    assert.deepEqual(archives, [metadata[0].filename]);
+
+    const archive = path.join(temporaryRoot, metadata[0].filename);
+    const listing = spawnSync("tar", ["-tzf", archive], {
+      cwd: temporaryRoot,
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true,
+    });
+    assert.equal(listing.status, 0, listing.stderr);
+    const entries = listing.stdout.split(/\r?\n/).filter(Boolean);
+    const forbidden = [
+      /^package\/node_modules\//,
+      /^package\/\.codex\//,
+      /^package\/\.anchor\//,
+      /(?:^|\/)__pycache__\//,
+      /\.pyc$/,
+      /(?:^|\/)[^/]+\.egg-info\//,
+      /^package\/(?:cache|\.npm|\.npm-cache)\//,
+      /(?:^|\/)(?:tests?|fixtures?)\//,
+    ];
+    for (const entry of entries) {
+      assert.equal(
+        forbidden.some((pattern) => pattern.test(entry)),
+        false,
+        `forbidden release archive entry: ${entry}`,
+      );
+    }
+    for (const required of [
+      "package/package.json",
+      "package/CHANGELOG.md",
+      "package/docs/MIGRATION_0.2.md",
+      "package/src/anchorloop/skills/anchorloop/SKILL.md",
+      "package/src/anchorloop/skills/anchorloop/references/workflow.md",
+    ]) {
+      assert(entries.includes(required), `missing release archive entry: ${required}`);
+    }
+    assert.equal(
+      entries.includes("package/package-lock.json"),
+      false,
+      "published runtime must not depend on checkout-only package-lock.json",
+    );
+
+    const extractRoot = path.join(temporaryRoot, "extracted");
+    fs.mkdirSync(extractRoot);
+    const extract = spawnSync("tar", ["-xzf", archive, "-C", extractRoot], {
+      cwd: temporaryRoot,
+      encoding: "utf8",
+      shell: false,
+      windowsHide: true,
+    });
+    assert.equal(extract.status, 0, extract.stderr);
+
+    const packagedRoot = path.join(extractRoot, "package");
+    const packagedVersion = spawnSync(
+      process.execPath,
+      [path.join(packagedRoot, "npm", "bin", "anchorloop.js"), "--version"],
+      {
+        cwd: packagedRoot,
+        encoding: "utf8",
+        shell: false,
+        windowsHide: true,
+      },
+    );
+    assert.equal(
+      packagedVersion.status,
+      0,
+      `${packagedVersion.stdout}\n${packagedVersion.stderr}`,
+    );
+    assert.equal(packagedVersion.stdout.trim(), packageMetadata.version);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 });

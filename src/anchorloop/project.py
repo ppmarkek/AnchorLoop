@@ -14,7 +14,13 @@ from typing import Any, Callable, Iterator, TypeVar
 from uuid import uuid4
 
 from .command import display_command
-from .quality import run_precommit, workspace_fingerprint
+from .quality import (
+    GitInspectionError,
+    git_changed_path_names,
+    run_precommit,
+    task_change_baseline,
+    workspace_fingerprint,
+)
 from .project_lock import ProjectLock
 from .safe_fs import AnchorError, SafeProjectFS
 from .transaction import ProjectTransaction, TransactionManager
@@ -36,6 +42,8 @@ _START_TASK_ARGUMENTS = 'start "short task title"'
 BRIEF_FIELDS = ("outcome", "scope", "constraints", "invariant", "uncertainty")
 VERIFICATION_RESULTS = {"pass", "fail", "partial", "not-applicable"}
 CAREFUL_RECALL_DELAY_HOURS = 24
+TASK_SCHEMA_VERSION = 2
+POST_CLOSE_INTEGRITY_FORMAT_VERSION = 1
 
 # These are deliberately conservative signals.  They promote a task only when
 # an engineer explicitly names a sensitive area or provides a recognisably
@@ -163,6 +171,8 @@ _CAREFUL_PATH_SIGNALS: dict[str, tuple[str, ...]] = {
         "/pyproject.toml",
     ),
 }
+
+_ACTUAL_DIFF_REVISION_REASON = "Actual diff introduced CAREFUL risk paths."
 
 _ReturnT = TypeVar("_ReturnT")
 
@@ -416,7 +426,7 @@ class AnchorProject:
         for path in sorted(self.fs.glob(closed_directory, "*.json")):
             try:
                 task = self._read_json(path)
-                self.validate_task_schema(task)
+                self._validate_closed_task_integrity(task, path)
                 comprehension = task.get("comprehension")
                 if not isinstance(comprehension, dict):
                     continue
@@ -563,6 +573,22 @@ class AnchorProject:
                         else []
                     )
                     for closed_path in closed_paths:
+                        self._validate_closed_task_integrity(
+                            self._read_json(closed_path),
+                            closed_path,
+                        )
+                    checks.append({"name": "closed-task-integrity", "status": "passed"})
+                except Exception as error:
+                    failed("closed-task-integrity", error)
+
+                try:
+                    closed_directory = self.anchor_dir / "tasks" / "closed"
+                    closed_paths = (
+                        sorted(self.fs.glob(closed_directory, "*.json"))
+                        if self._exists(closed_directory)
+                        else []
+                    )
+                    for closed_path in closed_paths:
                         closed_task = self._read_json(closed_path)
                         self.validate_task_schema(closed_task)
                         comprehension = closed_task.get("comprehension")
@@ -640,6 +666,7 @@ class AnchorProject:
             raise AnchorError(f"Task {task['id']} is already active in state {task['state']}.")
         normalized_title = self._required_text(title, "Task title")
         task = {
+            "schema_version": TASK_SCHEMA_VERSION,
             "id": f"al-{datetime.now(UTC).strftime('%Y%m%d')}-{uuid4().hex[:6]}",
             "title": normalized_title,
             "state": "briefing",
@@ -836,20 +863,24 @@ class AnchorProject:
         task = self._task_in_state("planned", "approve")
         if "plan" not in task:
             raise AnchorError("A recorded plan is required before approval.")
+        self._normalize_task_schema_for_approval(task)
+        self._ensure_task_change_baseline(task)
         snapshot = self._active_rules_snapshot()
         task["ruleset"] = snapshot
         approval_subject = self._task_approval_subject(task)
         subject_digest = self._document_digest(approval_subject)
         if provenance == "interactive-tty" and expected_subject_digest != subject_digest:
             raise AnchorError("The approval subject changed after it was displayed; review and confirm it again.")
-        task["approval"] = {
+        approval = {
             **self._approval_record(by, provenance, interactive_confirmed=interactive_confirmed),
             "plan_summary": task["plan"]["summary"],
             **self._task_approval_digests(approval_subject),
             "ruleset_version": snapshot["version"],
         }
         if provenance == "interactive-tty":
-            task["approval"]["confirmed_subject_digest"] = subject_digest
+            approval["confirmed_subject_digest"] = subject_digest
+        approval["record_digest"] = self._record_digest(approval)
+        task["approval"] = approval
         return self._advance_task(task, "approve", "approved")
 
     @consistent_read("task.approval-preview")
@@ -859,9 +890,11 @@ class AnchorProject:
         task = deepcopy(self._task_in_state("planned", "approve"))
         if "plan" not in task:
             raise AnchorError("A recorded plan is required before approval.")
+        self._normalize_task_schema_for_approval(task)
+        self._ensure_task_change_baseline(task)
         task["ruleset"] = self._active_rules_snapshot()
         subject = self._task_approval_subject(task)
-        return {
+        preview = {
             "task_id": task["id"],
             "title": task["title"],
             "mode": task.get("mode", "FAST"),
@@ -869,6 +902,11 @@ class AnchorProject:
             "subject_digest": self._document_digest(subject),
             "ruleset_version": task["ruleset"]["version"],
         }
+        if "actual_diff_revision_evidence" in subject:
+            preview["actual_diff_revision_evidence"] = subject[
+                "actual_diff_revision_evidence"
+            ]
+        return preview
 
     @mutating("task.verify")
     def verify_task(
@@ -943,9 +981,15 @@ class AnchorProject:
             **self._approval_record(engineer, provenance, interactive_confirmed=interactive_confirmed),
             "result": normalized_result,
             "reason": normalized_reason,
+            "subject_digest": subject_digest,
+            "reported_metrics": self._verification_metric_snapshot(task),
+            "comprehension_digest": self._document_digest(
+                task.get("comprehension", {}).get("verification_check")
+            ),
         }
         if provenance == "interactive-tty":
             verification["confirmed_subject_digest"] = subject_digest
+        verification["record_digest"] = self._record_digest(verification)
         task["verification"] = verification
         if normalized_result == "fail":
             self._append_task_event(task, "task.verify.failed")
@@ -991,7 +1035,7 @@ class AnchorProject:
         response: str,
         score: int,
     ) -> dict[str, Any]:
-        if not TASK_ID_PATTERN.fullmatch(task_id):
+        if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
             raise AnchorError("Invalid AnchorLoop task ID.")
         if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 5:
             raise AnchorError("Delayed recall score must be an integer from 0 to 5.")
@@ -999,18 +1043,7 @@ class AnchorProject:
         if not self._exists(path):
             raise AnchorError(f"Closed task '{task_id}' does not exist.")
         task = self._read_json(path)
-        self.validate_task_schema(task)
-        if task.get("id") != task_id or task.get("state") != "closed":
-            raise AnchorError("Delayed recall requires an intact closed task record.")
-        approval = task.get("approval")
-        expected_approval = self._task_approval_digests(self._task_approval_subject(task))
-        if (
-            not isinstance(approval, dict)
-            or approval.get("task_digest") != expected_approval["task_digest"]
-        ):
-            raise AnchorError(
-                "Closed task ownership or recall policy changed after approval; delayed recall is blocked."
-            )
+        self._validate_closed_task_integrity(task, path)
         comprehension = task.get("comprehension")
         if not isinstance(comprehension, dict) or not comprehension.get("recall_due_at"):
             raise AnchorError("This task has no scheduled delayed recall.")
@@ -1020,7 +1053,7 @@ class AnchorProject:
         now = datetime.now(UTC)
         if now < due_at:
             raise AnchorError(f"Delayed recall is not due until {due_at.isoformat()}.")
-        comprehension["delayed_recall"] = {
+        recall_record = {
             "statement": self._required_text(response, "Delayed recall response"),
             "score": score,
             "by": self._required_text(by, "Engineer name"),
@@ -1028,6 +1061,12 @@ class AnchorProject:
             "recorded_at": now.isoformat(),
             "delay_seconds": max(0.0, (now - due_at).total_seconds()),
         }
+        self._seal_post_close_record(
+            task,
+            recall_record,
+            record_type="delayed_recall",
+        )
+        comprehension["delayed_recall"] = recall_record
         task.setdefault("metrics", {})["delayed_recall_score"] = score
         self._append_task_event(task, "task.delayed-recall.recorded")
         self._write_json(path, task)
@@ -1044,7 +1083,7 @@ class AnchorProject:
         corrective_refactor: bool,
         notes: str,
     ) -> dict[str, Any]:
-        if not TASK_ID_PATTERN.fullmatch(task_id):
+        if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
             raise AnchorError("Invalid AnchorLoop task ID.")
         if (
             not isinstance(defects_found, int)
@@ -1058,18 +1097,7 @@ class AnchorProject:
         if not self._exists(path):
             raise AnchorError(f"Closed task '{task_id}' does not exist.")
         task = self._read_json(path)
-        self.validate_task_schema(task)
-        if task.get("id") != task_id or task.get("state") != "closed":
-            raise AnchorError("Post-completion outcome requires an intact closed task record.")
-        approval = task.get("approval")
-        expected_approval = self._task_approval_digests(self._task_approval_subject(task))
-        if (
-            not isinstance(approval, dict)
-            or approval.get("task_digest") != expected_approval["task_digest"]
-        ):
-            raise AnchorError(
-                "Closed task ownership changed after approval; post-completion outcome is blocked."
-            )
+        self._validate_closed_task_integrity(task, path)
         record = {
             "at": self._timestamp(),
             "by": self._required_text(by, "Engineer name"),
@@ -1079,6 +1107,11 @@ class AnchorProject:
             "notes": self._required_text(notes, "Post-completion notes"),
             "provenance": "reported-post-completion",
         }
+        self._seal_post_close_record(
+            task,
+            record,
+            record_type="post_completion_outcome",
+        )
         task.setdefault("post_completion_outcomes", []).append(record)
         task.setdefault("metrics", {})["latest_post_completion_outcome"] = {
             key: record[key]
@@ -1094,9 +1127,7 @@ class AnchorProject:
         closed_directory = self.anchor_dir / "tasks" / "closed"
         for path in sorted(self.fs.glob(closed_directory, "*.json")):
             task = self._read_json(path)
-            self.validate_task_schema(task)
-            if task.get("state") != "closed" or task.get("id") != path.stem:
-                raise AnchorError(f"Closed task record is inconsistent: {path}")
+            self._validate_closed_task_integrity(task, path)
             metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
             comprehension = (
                 task.get("comprehension")
@@ -1112,6 +1143,21 @@ class AnchorProject:
             if not isinstance(outcomes, list):
                 outcomes = []
             latest_outcome = outcomes[-1] if outcomes and isinstance(outcomes[-1], dict) else {}
+            delayed_integrity = self._post_close_record_integrity(task, delayed)
+            outcome_integrities = [
+                self._post_close_record_integrity(task, record)
+                for record in outcomes
+                if isinstance(record, dict)
+            ]
+            latest_outcome_integrity = (
+                outcome_integrities[-1] if outcome_integrities else None
+            )
+            legacy_unverified_observations = int(
+                delayed_integrity == "legacy-unverified"
+            ) + sum(
+                integrity == "legacy-unverified"
+                for integrity in outcome_integrities
+            )
             input_tokens = metrics.get("input_tokens")
             output_tokens = metrics.get("output_tokens")
             total_tokens = (
@@ -1135,7 +1181,10 @@ class AnchorProject:
                     "agent_provider": metrics.get("agent_provider"),
                     "agent_model": metrics.get("agent_model"),
                     "delayed_recall_score": delayed.get("score"),
+                    "delayed_recall_integrity": delayed_integrity,
                     "outcome_observations": len(outcomes),
+                    "latest_outcome_integrity": latest_outcome_integrity,
+                    "legacy_unverified_observations": legacy_unverified_observations,
                     "defects_found": latest_outcome.get("defects_found"),
                     "rollback": latest_outcome.get("rollback"),
                     "corrective_refactor": latest_outcome.get("corrective_refactor"),
@@ -1161,6 +1210,9 @@ class AnchorProject:
                 "tasks_with_delayed_recall": len(recall_scores),
                 "tasks_with_outcome_observation": sum(
                     int(row["outcome_observations"] > 0) for row in rows
+                ),
+                "legacy_unverified_observations": sum(
+                    row["legacy_unverified_observations"] for row in rows
                 ),
                 "average_delayed_recall_score": (
                     sum(recall_scores) / len(recall_scores) if recall_scores else None
@@ -1189,10 +1241,18 @@ class AnchorProject:
             "quality": task.get("quality", []),
         }
         if target == "plan":
+            if normalized_reason == _ACTUAL_DIFF_REVISION_REASON:
+                revision["actual_diff_risk_paths"] = self._actual_diff_risk_paths(task)
             revision["approval"] = task.get("approval")
             revision["ruleset"] = task.get("ruleset")
+            revision["change_baseline"] = task.get("change_baseline")
             task.setdefault("revisions", []).append(revision)
-            for field in ("approval", "ruleset", "quality", "verification"):
+            for field in (
+                "approval",
+                "ruleset",
+                "quality",
+                "verification",
+            ):
                 task.pop(field, None)
             task["state"] = "planned"
             self._append_task_event(task, "task.revise.plan")
@@ -1227,6 +1287,8 @@ class AnchorProject:
             raise AnchorError(f"Cannot run '{action}' while task is '{state}'.{detail}")
         if action in {"implement", "review", "precommit", "close"}:
             self._ensure_approval_matches_task(task)
+        if action == "review":
+            self._ensure_actual_diff_mode(task)
         if action == "close":
             verification = task.get("verification", {})
             if verification.get("result") not in {"pass", "partial", "not-applicable"}:
@@ -1252,9 +1314,20 @@ class AnchorProject:
                 closed_at = self._closed_at(task)
                 delay = self._recall_delay_hours(comprehension)
                 comprehension["recall_due_at"] = (closed_at + timedelta(hours=delay)).isoformat()
+        if action == "close" and task.get("schema_version") == TASK_SCHEMA_VERSION:
+            task["post_close_integrity"] = {
+                "format_version": POST_CLOSE_INTEGRITY_FORMAT_VERSION,
+                "head_sequence": 0,
+                "head_digest": None,
+            }
+            task["close_digest"] = self._closed_task_digest(task)
+            task["post_close_integrity"]["head_digest"] = task["close_digest"]
+        elif action == "close":
+            task["close_digest"] = self._closed_task_digest(task)
         self._append_task_event(task, f"task.{action}")
         if action == "close":
             closed_path = self.anchor_dir / "tasks" / "closed" / f"{task['id']}.json"
+            self._validate_closed_task_integrity(task, closed_path)
             self._write_json(closed_path, task)
             self._unlink(self.active_task_path)
             recall_due_at = (
@@ -1292,8 +1365,18 @@ class AnchorProject:
         if task["state"] != "review_ready":
             raise AnchorError(f"Cannot run 'precommit' while task is '{task['state']}'.")
         self._ensure_approval_matches_task(task)
+        self._ensure_actual_diff_mode(task)
         ruleset = task.get("ruleset") or {"rules": {}}
-        quality = run_precommit(self.root, active_categories=set(ruleset["rules"]))
+        try:
+            quality = run_precommit(
+                self.root,
+                active_categories=set(ruleset["rules"]),
+                baseline=task.get("change_baseline"),
+            )
+        except GitInspectionError as error:
+            raise AnchorError(
+                f"Cannot inspect pre-commit source snapshots safely: {error}"
+            ) from error
         task.setdefault("quality", []).append(quality)
         self._write_json(self.active_task_path, task)
         if quality["status"] == "blocked":
@@ -1848,6 +1931,214 @@ class AnchorProject:
             return "STANDARD", f"task type {task_type!r} changes product or code behavior"
         return "STANDARD", "unknown task risk defaults to engineer-owned STANDARD planning"
 
+    def _ensure_actual_diff_mode(self, task: dict[str, Any]) -> None:
+        """Block a low-ownership task when its material diff is CAREFUL."""
+
+        risk_paths = self._actual_diff_risk_paths(task)
+        if task.get("mode") == "CAREFUL":
+            return
+        if not risk_paths:
+            return
+
+        plan = task.get("plan")
+        recommendation = (
+            plan.get("mode_recommendation")
+            if isinstance(plan, dict)
+            else None
+        )
+        override = (
+            recommendation.get("override_reason")
+            if isinstance(recommendation, dict)
+            else None
+        )
+        if (
+            self._actual_diff_override_covers(override, risk_paths)
+            and self._has_actual_diff_revision(task, risk_paths)
+        ):
+            return
+
+        locations = ", ".join(risk_paths)
+        revise = display_command(
+            'revise --target plan --reason '
+            f'"{_ACTUAL_DIFF_REVISION_REASON}"'
+        )
+        raise AnchorError(
+            f"Actual diff introduced CAREFUL risk paths: {locations}. "
+            f"Task mode {task.get('mode')} cannot continue. Run: {revise}. "
+            "Record and approve a new plan. Keeping a lower mode requires an "
+            "engineer-owned --mode-override-reason that explicitly lists "
+            "every detected path."
+        )
+
+    def _actual_diff_risk_paths(self, task: dict[str, Any]) -> list[str]:
+        risky: list[str] = []
+        baseline = task.get("change_baseline")
+        if not isinstance(baseline, dict):
+            raise AnchorError(
+                "Cannot evaluate the actual diff safely; the approved task has no "
+                "change baseline. Revise and approve the plan again."
+            )
+        try:
+            changed_paths = git_changed_path_names(
+                self.root,
+                baseline=baseline,
+                strict=True,
+            )
+        except GitInspectionError as error:
+            raise AnchorError(
+                "Cannot evaluate the actual diff safely; review and precommit are blocked. "
+                f"{error} Restore the approved baseline and retry."
+            ) from error
+        for path in changed_paths:
+            path_text = "/" + path.casefold().strip("/")
+            if any(
+                marker.casefold() in path_text
+                for markers in _CAREFUL_PATH_SIGNALS.values()
+                for marker in markers
+            ):
+                risky.append(path)
+        return risky
+
+    def _ensure_task_change_baseline(self, task: dict[str, Any]) -> None:
+        """Capture one immutable task baseline before its first approval."""
+
+        existing = task.get("change_baseline")
+        if isinstance(existing, dict):
+            self._materialize_missing_submodule_baselines(existing)
+            return
+        try:
+            task["change_baseline"] = task_change_baseline(self.root)
+        except GitInspectionError as error:
+            raise AnchorError(
+                "Cannot capture the task change baseline safely; approval is blocked. "
+                f"{error}"
+            ) from error
+
+    def _materialize_missing_submodule_baselines(
+        self,
+        baseline: dict[str, Any],
+    ) -> None:
+        """Fill only newly materialized submodules without moving task origin.
+
+        Plan revision must not advance the outer baseline to current HEAD or a
+        committed sensitive diff could disappear.  An approved uninitialized
+        submodule is the narrow exception: once materialized at its tracked
+        gitlink, capture its nested baseline while preserving the original
+        outer commit.
+        """
+
+        if baseline.get("source") != "git":
+            return
+        submodules = baseline.get("submodules")
+        missing = (
+            [name for name, nested in submodules.items() if nested is None]
+            if isinstance(submodules, dict)
+            else []
+        )
+        if not missing:
+            return
+        try:
+            current = task_change_baseline(self.root)
+        except GitInspectionError as error:
+            raise AnchorError(
+                "Cannot inspect newly materialized Git submodules safely; approval is blocked. "
+                f"{error}"
+            ) from error
+        if current.get("source") != "git":
+            raise AnchorError("The preserved Git task baseline no longer belongs to a Git project.")
+        expected_oids = baseline.get("submodule_oids")
+        current_oids = current.get("submodule_oids")
+        current_submodules = current.get("submodules")
+        if (
+            not isinstance(expected_oids, dict)
+            or not isinstance(current_oids, dict)
+            or not isinstance(current_submodules, dict)
+            or set(expected_oids) != set(current_oids)
+        ):
+            raise AnchorError(
+                "The Git submodule set changed after the task baseline was captured."
+            )
+        for name in missing:
+            nested = current_submodules.get(name)
+            if nested is None:
+                continue
+            if (
+                not isinstance(nested, dict)
+                or nested.get("source") != "git"
+                or nested.get("head") != current_oids.get(name)
+                or current_oids.get(name) != expected_oids.get(name)
+            ):
+                raise AnchorError(
+                    f"Materialized Git submodule does not match its approved gitlink: {name}"
+                )
+            submodules[name] = nested
+
+    @classmethod
+    def _has_actual_diff_revision(
+        cls,
+        task: dict[str, Any],
+        risk_paths: list[str],
+    ) -> bool:
+        required = set(risk_paths)
+        if not required:
+            return False
+        return any(
+            required.issubset(set(evidence["risk_paths"]))
+            for evidence in cls._actual_diff_revision_evidence(task)
+        )
+
+    @staticmethod
+    def _actual_diff_revision_evidence(
+        task: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        revisions = task.get("revisions")
+        if not isinstance(revisions, list):
+            return []
+        evidence: list[dict[str, Any]] = []
+        for revision in revisions:
+            if (
+                not isinstance(revision, dict)
+                or revision.get("target") != "plan"
+                or revision.get("reason") != _ACTUAL_DIFF_REVISION_REASON
+                or revision.get("previous_state")
+                not in {"implementing", "review_ready", "quality_checked"}
+            ):
+                continue
+            paths = revision.get("actual_diff_risk_paths")
+            if (
+                not isinstance(paths, list)
+                or not paths
+                or not all(isinstance(path, str) and path for path in paths)
+            ):
+                continue
+            evidence.append(
+                {
+                    "at": revision.get("at"),
+                    "previous_state": revision.get("previous_state"),
+                    "risk_paths": sorted(set(paths)),
+                }
+            )
+        return evidence
+
+    @staticmethod
+    def _actual_diff_override_covers(
+        override: object,
+        risk_paths: list[str],
+    ) -> bool:
+        if not isinstance(override, str) or not override.strip():
+            return False
+        normalized = override.replace("\\", "/").casefold()
+        path_character = r"[\w./-]"
+        return all(
+            re.search(
+                rf"(?<!{path_character}){re.escape(path.casefold())}"
+                rf"(?!{path_character})",
+                normalized,
+            )
+            is not None
+            for path in risk_paths
+        )
+
     @contextmanager
     def _mutation(self, command: str, *, allow_unconfigured: bool) -> Iterator[None]:
         if self._mutation_depth:
@@ -1987,8 +2278,10 @@ class AnchorProject:
     def _write_json(self, path: Path, data: dict[str, Any]) -> None:
         candidate = self.fs.validate(path)
         closed_tasks = self.anchor_dir / "tasks" / "closed"
-        if candidate == self.active_task_path or candidate.parent == closed_tasks:
+        if candidate == self.active_task_path:
             self.validate_task_schema(data)
+        elif candidate.parent == closed_tasks:
+            self._validate_closed_task_integrity(data, candidate)
         self._write_text(path, json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
     def _write_json_if_missing(self, path: Path, data: dict[str, Any]) -> None:
@@ -2110,6 +2403,9 @@ class AnchorProject:
 
         if not isinstance(task, dict):
             raise AnchorError("Anchor task state must be a JSON object.")
+        schema_version = task.get("schema_version")
+        if schema_version is not None and schema_version != TASK_SCHEMA_VERSION:
+            raise AnchorError("Anchor task has an unsupported schema version.")
         task_id = task.get("id")
         if not isinstance(task_id, str) or not TASK_ID_PATTERN.fullmatch(task_id):
             raise AnchorError("Anchor task has an invalid ID.")
@@ -2119,6 +2415,7 @@ class AnchorProject:
         if state not in allowed_states:
             raise AnchorError(f"Anchor task has an invalid state: {state!r}.")
         cls._required_text(task.get("created_at"), "Task creation time")
+        cls._created_at(task)
         brief = cls.validate_brief_fields(task.get("brief"), allow_unfilled=True)
         brief_record = task.get("brief_record")
         brief_is_complete = all(value is not None for value in brief.values())
@@ -2157,9 +2454,79 @@ class AnchorProject:
             raise AnchorError("Anchor task plan must be an object.")
         for field in ("summary", "approach", "rejected_alternative", "primary_risk", "verification_strategy"):
             cls._required_text(plan.get(field), f"Anchor task plan {field}")
+        rollback_mitigation = plan.get("rollback_mitigation")
+        if rollback_mitigation is not None:
+            cls._required_text(rollback_mitigation, "Anchor task plan rollback mitigation")
+        if mode == "CAREFUL" and rollback_mitigation is None:
+            raise AnchorError("CAREFUL task ownership evidence requires rollback or mitigation guidance.")
+
+        metrics = task.get("metrics")
+        if not isinstance(metrics, dict):
+            raise AnchorError("Anchor task metrics must be an object.")
+        cls.validate_metric_types(
+            agent_turns=metrics.get("agent_turns"),
+            input_tokens=metrics.get("input_tokens"),
+            output_tokens=metrics.get("output_tokens"),
+            active_minutes=metrics.get("active_minutes"),
+            agent_provider=metrics.get("agent_provider"),
+            agent_model=metrics.get("agent_model"),
+        )
+        has_reported_metrics = any(
+            metrics.get(field) is not None
+            for field in (
+                "agent_turns",
+                "input_tokens",
+                "output_tokens",
+                "active_minutes",
+                "agent_provider",
+                "agent_model",
+            )
+        )
+        expected_metric_provenance = "reported-at-verification" if has_reported_metrics else None
+        if metrics.get("provenance") != expected_metric_provenance:
+            raise AnchorError("Anchor task metric provenance does not match its reported metrics.")
+
+        human_artifact = task.get("human_artifact")
+        if human_artifact is not None:
+            if not isinstance(human_artifact, dict):
+                raise AnchorError("Anchor task human ownership artifact must be an object.")
+            for field in ("content", "by", "at", "source"):
+                cls._required_text(
+                    human_artifact.get(field),
+                    f"Anchor task human ownership artifact {field}",
+                )
         comprehension = task.get("comprehension")
         if not isinstance(comprehension, dict):
             raise AnchorError("Anchor task comprehension policy must be an object.")
+        baseline = comprehension.get("baseline")
+        if baseline is not None:
+            if not isinstance(baseline, dict):
+                raise AnchorError("Anchor task comprehension baseline must be an object.")
+            for field in ("statement", "by", "at"):
+                cls._required_text(
+                    baseline.get(field),
+                    f"Anchor task comprehension baseline {field}",
+                )
+        if mode in {"STANDARD", "CAREFUL"} and (
+            human_artifact is None or baseline is None
+        ):
+            raise AnchorError(
+                f"{mode} task ownership evidence requires a human artifact and comprehension baseline."
+            )
+
+        verification_check = comprehension.get("verification_check")
+        if verification_check is not None:
+            if not isinstance(verification_check, dict):
+                raise AnchorError("Anchor task verification comprehension must be an object.")
+            for field in ("statement", "by", "at"):
+                cls._required_text(
+                    verification_check.get(field),
+                    f"Anchor task verification comprehension {field}",
+                )
+
+        due_at = comprehension.get("recall_due_at")
+        if due_at is not None:
+            cls._required_text(due_at, "Delayed recall due time")
         if mode == "CAREFUL":
             if "recall_delay_hours" in comprehension:
                 delay = comprehension.get("recall_delay_hours")
@@ -2171,34 +2538,313 @@ class AnchorProject:
                     raise AnchorError(
                         "CAREFUL tasks must retain the approved 24-hour delayed-recall policy."
                     )
+                if state == "closed" and due_at is None:
+                    raise AnchorError("Closed CAREFUL tasks require a delayed-recall schedule.")
+                if state != "closed" and due_at is not None:
+                    raise AnchorError(
+                        "CAREFUL delayed recall must be scheduled from the close time, not before close."
+                    )
             elif comprehension.get("recall_due_at") is None:
                 raise AnchorError(
                     "Legacy CAREFUL tasks must retain their approved delayed-recall timestamp."
                 )
-        elif comprehension.get("recall_delay_hours") is not None:
-            raise AnchorError("Only CAREFUL tasks may carry a delayed-recall policy.")
-        due_at = comprehension.get("recall_due_at")
-        if due_at is not None:
-            cls._required_text(due_at, "Delayed recall due time")
+        elif (
+            comprehension.get("recall_delay_hours") is not None
+            or due_at is not None
+            or comprehension.get("delayed_recall") is not None
+        ):
+            raise AnchorError("Only CAREFUL tasks may carry a delayed-recall policy or record.")
+
+        change_baseline = task.get("change_baseline")
+        if change_baseline is not None:
+            cls._validate_task_change_baseline(change_baseline)
+
+        protected_post_close = task.get("post_close_integrity") is not None
+        delayed_recall = comprehension.get("delayed_recall")
+        if delayed_recall is not None:
+            if not isinstance(delayed_recall, dict):
+                raise AnchorError("Delayed recall record must be an object.")
+            for field in ("statement", "by", "due_at", "recorded_at"):
+                cls._required_text(delayed_recall.get(field), f"Delayed recall {field}")
+            score = delayed_recall.get("score")
+            if not isinstance(score, int) or isinstance(score, bool) or not 0 <= score <= 5:
+                raise AnchorError("Delayed recall score must be an integer from 0 to 5.")
+            delay_seconds = delayed_recall.get("delay_seconds")
+            if (
+                not isinstance(delay_seconds, (int, float))
+                or isinstance(delay_seconds, bool)
+                or not math.isfinite(float(delay_seconds))
+                or delay_seconds < 0
+            ):
+                raise AnchorError("Delayed recall delay must be a finite non-negative number.")
+            recall_digest = delayed_recall.get("record_digest")
+            if recall_digest is None:
+                if protected_post_close:
+                    raise AnchorError(
+                        "Protected delayed recall records require a record digest."
+                    )
+            else:
+                cls._required_text(recall_digest, "Delayed recall record digest")
+                if recall_digest != cls._record_digest(delayed_recall):
+                    raise AnchorError(
+                        "delayed recall record digest does not match its contents."
+                    )
+
+        outcomes = task.get("post_completion_outcomes")
+        if outcomes is not None:
+            if state != "closed":
+                raise AnchorError("Only closed tasks may carry post-completion outcomes.")
+            if not isinstance(outcomes, list):
+                raise AnchorError("Post-completion outcomes must be a list.")
+            for record in outcomes:
+                if not isinstance(record, dict):
+                    raise AnchorError("Post-completion outcome record must be an object.")
+                for field in ("at", "by", "notes", "provenance"):
+                    cls._required_text(
+                        record.get(field),
+                        f"Post-completion outcome {field}",
+                    )
+                defects_found = record.get("defects_found")
+                if (
+                    not isinstance(defects_found, int)
+                    or isinstance(defects_found, bool)
+                    or defects_found < 0
+                ):
+                    raise AnchorError(
+                        "Post-completion outcome defects must be a non-negative integer."
+                    )
+                if not isinstance(record.get("rollback"), bool) or not isinstance(
+                    record.get("corrective_refactor"), bool
+                ):
+                    raise AnchorError(
+                        "Post-completion outcome rollback and corrective-refactor values must be boolean."
+                    )
+                if record.get("provenance") != "reported-post-completion":
+                    raise AnchorError("Post-completion outcome provenance is invalid.")
+                outcome_digest = record.get("record_digest")
+                if outcome_digest is None:
+                    if protected_post_close:
+                        raise AnchorError(
+                            "Protected post-completion outcome records require a record digest."
+                        )
+                else:
+                    cls._required_text(
+                        outcome_digest,
+                        "Post-completion outcome record digest",
+                    )
+                    if outcome_digest != cls._record_digest(record):
+                        raise AnchorError(
+                            "post-completion outcome record digest does not match its contents."
+                        )
+
+        if protected_post_close and state != "closed":
+            raise AnchorError("Only closed tasks may carry post-close integrity evidence.")
+
+        approved_states = {
+            "approved",
+            "implementing",
+            "review_ready",
+            "quality_checked",
+            "verified",
+            "closed",
+        }
+        if state in approved_states:
+            approval = task.get("approval")
+            if not isinstance(approval, dict):
+                raise AnchorError("Approved task states require an approval record.")
+            for field in (
+                "by",
+                "at",
+                "provenance",
+                "brief_digest",
+                "brief_record_digest",
+                "plan_digest",
+                "ownership_digest",
+                "ruleset_digest",
+                "task_digest",
+                "ruleset_version",
+            ):
+                cls._required_text(approval.get(field), f"Anchor task approval {field}")
+            if approval.get("provenance") not in APPROVAL_PROVENANCE:
+                raise AnchorError("Anchor task approval has invalid provenance.")
+            confirmed_approval_digest = approval.get("confirmed_subject_digest")
+            if confirmed_approval_digest is not None:
+                cls._required_text(
+                    confirmed_approval_digest,
+                    "Anchor task confirmed approval subject digest",
+                )
+            approval_record_digest = approval.get("record_digest")
+            if schema_version == TASK_SCHEMA_VERSION and approval_record_digest is None:
+                raise AnchorError("Current task records require an approval record digest.")
+            if approval_record_digest is not None:
+                cls._required_text(
+                    approval_record_digest,
+                    "Anchor task approval record digest",
+                )
+                if approval_record_digest != cls._record_digest(approval):
+                    raise AnchorError("Anchor task approval record digest does not match.")
+            ruleset = task.get("ruleset")
+            if not isinstance(ruleset, dict):
+                raise AnchorError("Approved task states require a ruleset snapshot.")
+            cls._required_text(ruleset.get("version"), "Anchor task ruleset version")
+            if not isinstance(ruleset.get("rules"), dict) or not isinstance(
+                ruleset.get("documents"), dict
+            ):
+                raise AnchorError("Anchor task ruleset snapshot is invalid.")
+
+        quality = task.get("quality")
+        if quality is not None and (
+            not isinstance(quality, list)
+            or not all(isinstance(item, dict) for item in quality)
+        ):
+            raise AnchorError("Anchor task quality evidence must be a list of objects.")
+        evidence_states = {"quality_checked", "verified", "closed"}
+        if state in evidence_states:
+            if not quality or quality[-1].get("status") != "passed":
+                raise AnchorError("Quality-checked task states require passing quality evidence.")
+
         if state in {"verified", "closed"}:
             verification = task.get("verification")
             if not isinstance(verification, dict):
                 raise AnchorError("Verified tasks require a verification record.")
-            cls.validate_verification_result(verification.get("result"))
+            result = cls.validate_verification_result(verification.get("result"))
+            if result == "fail":
+                raise AnchorError("Verified or closed tasks cannot retain a failed verification result.")
             cls._required_text(verification.get("reason"), "Verification reason")
+            for field in ("by", "at", "provenance"):
+                cls._required_text(verification.get(field), f"Anchor task verification {field}")
+            if verification.get("provenance") not in APPROVAL_PROVENANCE:
+                raise AnchorError("Anchor task verification has invalid provenance.")
+            for field in ("subject_digest", "confirmed_subject_digest"):
+                value = verification.get(field)
+                if value is not None:
+                    cls._required_text(value, f"Anchor task verification {field}")
+            if (
+                schema_version == TASK_SCHEMA_VERSION
+                and verification.get("subject_digest") is None
+            ):
+                raise AnchorError(
+                    "Current task records require a verification subject digest."
+                )
+            reported_metrics = verification.get("reported_metrics")
+            expected_reported_metrics = cls._verification_metric_snapshot(task)
+            if schema_version == TASK_SCHEMA_VERSION and reported_metrics is None:
+                raise AnchorError("Current task records require a verification metric snapshot.")
+            if reported_metrics is not None:
+                if not isinstance(reported_metrics, dict) or reported_metrics != expected_reported_metrics:
+                    raise AnchorError(
+                        "Anchor task verification metric snapshot no longer matches stored metrics."
+                    )
+            comprehension_digest = verification.get("comprehension_digest")
+            expected_comprehension_digest = cls._document_digest(verification_check)
+            if schema_version == TASK_SCHEMA_VERSION and comprehension_digest is None:
+                raise AnchorError("Current task records require a verification comprehension digest.")
+            if comprehension_digest is not None:
+                cls._required_text(
+                    comprehension_digest,
+                    "Anchor task verification comprehension digest",
+                )
+                if comprehension_digest != expected_comprehension_digest:
+                    raise AnchorError(
+                        "Anchor task verification comprehension digest does not match."
+                    )
+            verification_record_digest = verification.get("record_digest")
+            if schema_version == TASK_SCHEMA_VERSION and verification_record_digest is None:
+                raise AnchorError("Current task records require a verification record digest.")
+            if verification_record_digest is not None:
+                cls._required_text(
+                    verification_record_digest,
+                    "Anchor task verification record digest",
+                )
+                if verification_record_digest != cls._record_digest(verification):
+                    raise AnchorError("Anchor task verification record digest does not match.")
+            if mode in {"STANDARD", "CAREFUL"} and verification_check is None:
+                raise AnchorError(
+                    f"{mode} verified tasks require a verification comprehension statement."
+                )
+        if state == "closed":
+            created_at = cls._created_at(task)
+            closed_at = cls._closed_at(task)
+            if closed_at < created_at:
+                raise AnchorError("Closed task timestamp cannot precede task creation.")
+            wall_seconds = metrics.get("wall_seconds")
+            if (
+                wall_seconds is not None
+                and (
+                    not isinstance(wall_seconds, (int, float))
+                    or isinstance(wall_seconds, bool)
+                    or not math.isfinite(float(wall_seconds))
+                    or wall_seconds < 0
+                )
+            ):
+                raise AnchorError("Closed task duration must be a finite non-negative number.")
+            if schema_version == TASK_SCHEMA_VERSION and wall_seconds is None:
+                raise AnchorError("Current closed task records require a close duration.")
+            if wall_seconds is not None:
+                expected_wall_seconds = (closed_at - created_at).total_seconds()
+                if not math.isclose(
+                    float(wall_seconds),
+                    expected_wall_seconds,
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                ):
+                    raise AnchorError(
+                        "Closed task duration does not match its creation and close timestamps."
+                    )
+            close_digest = task.get("close_digest")
+            approval_evidence = task.get("approval")
+            verification_evidence = task.get("verification")
+            has_current_integrity_evidence = (
+                schema_version == TASK_SCHEMA_VERSION
+                or (
+                    isinstance(approval_evidence, dict)
+                    and approval_evidence.get("record_digest") is not None
+                )
+                or (
+                    isinstance(verification_evidence, dict)
+                    and any(
+                        verification_evidence.get(field) is not None
+                        for field in (
+                            "record_digest",
+                            "reported_metrics",
+                            "comprehension_digest",
+                        )
+                    )
+                )
+            )
+            if has_current_integrity_evidence and close_digest is None:
+                raise AnchorError("Current closed task records require a close digest.")
+            if close_digest is not None:
+                cls._required_text(close_digest, "Anchor task close digest")
+                if close_digest != cls._closed_task_digest(task):
+                    raise AnchorError("Anchor task close digest does not match immutable close evidence.")
+            cls._validate_post_close_integrity(task)
+
+    @staticmethod
+    def _created_at(task: dict[str, Any]) -> datetime:
+        value = task.get("created_at")
+        if not isinstance(value, str):
+            raise AnchorError("Task is missing its creation timestamp.")
+        try:
+            created_at = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise AnchorError("Task has an invalid creation timestamp.") from error
+        if created_at.tzinfo is None:
+            raise AnchorError("Task creation timestamp must include a timezone.")
+        return created_at
 
     @staticmethod
     def _closed_at(task: dict[str, Any]) -> datetime:
         metrics = task.get("metrics")
         value = metrics.get("closed_at") if isinstance(metrics, dict) else None
         if not isinstance(value, str):
-            raise AnchorError("Closed CAREFUL task is missing its close timestamp.")
+            raise AnchorError("Closed task is missing its close timestamp.")
         try:
             closed_at = datetime.fromisoformat(value)
         except ValueError as error:
-            raise AnchorError("Closed CAREFUL task has an invalid close timestamp.") from error
+            raise AnchorError("Closed task has an invalid close timestamp.") from error
         if closed_at.tzinfo is None:
-            raise AnchorError("Closed CAREFUL task timestamp must include a timezone.")
+            raise AnchorError("Closed task timestamp must include a timezone.")
         return closed_at
 
     @staticmethod
@@ -2256,14 +2902,403 @@ class AnchorProject:
             )
         return due_at
 
+    def _validate_closed_task_integrity(
+        self,
+        task: dict[str, Any],
+        path: Path,
+    ) -> None:
+        """Validate immutable close evidence without comparing it to the live workspace."""
+
+        prefix = f"Closed task record is inconsistent: {path}"
+        try:
+            self.validate_task_schema(task)
+            if task.get("state") != "closed" or task.get("id") != path.stem:
+                raise AnchorError("task state or ID does not match its closed-task path")
+
+            approval = task.get("approval")
+            expected_approval = self._task_approval_digests(
+                self._task_approval_subject(task)
+            )
+            if not isinstance(approval, dict):
+                raise AnchorError("approval evidence is missing")
+            changed_approval = [
+                field
+                for field, digest in expected_approval.items()
+                if approval.get(field) != digest
+            ]
+            if changed_approval:
+                raise AnchorError(
+                    "approval evidence no longer matches: "
+                    + ", ".join(changed_approval)
+                )
+            confirmed_approval = approval.get("confirmed_subject_digest")
+            if (
+                confirmed_approval is not None
+                and confirmed_approval != expected_approval["task_digest"]
+            ):
+                raise AnchorError("confirmed approval subject no longer matches")
+            ruleset = task.get("ruleset")
+            if (
+                not isinstance(ruleset, dict)
+                or approval.get("ruleset_version") != ruleset.get("version")
+            ):
+                raise AnchorError("approval ruleset version no longer matches")
+
+            quality = task.get("quality")
+            if (
+                not isinstance(quality, list)
+                or not quality
+                or not isinstance(quality[-1], dict)
+                or quality[-1].get("status") != "passed"
+            ):
+                raise AnchorError("latest quality evidence is not passing")
+
+            verification = task.get("verification")
+            if not isinstance(verification, dict):
+                raise AnchorError("verification evidence is missing")
+            result = verification.get("result")
+            if result not in {"pass", "partial", "not-applicable"}:
+                raise AnchorError("closing verification result is not accepted")
+            comprehension = task.get("comprehension")
+            verification_check = (
+                comprehension.get("verification_check")
+                if isinstance(comprehension, dict)
+                else None
+            )
+            recall = (
+                verification_check.get("statement")
+                if isinstance(verification_check, dict)
+                else None
+            )
+            expected_verification_digest = self._verification_subject_digest(
+                task,
+                result=result,
+                reason=verification.get("reason"),
+                recall=recall,
+            )
+            recorded_verification_digest = verification.get("subject_digest")
+            if (
+                recorded_verification_digest is not None
+                and recorded_verification_digest != expected_verification_digest
+            ):
+                raise AnchorError("verification subject no longer matches")
+            confirmed_verification_digest = verification.get(
+                "confirmed_subject_digest"
+            )
+            if (
+                confirmed_verification_digest is not None
+                and confirmed_verification_digest != expected_verification_digest
+            ):
+                raise AnchorError("confirmed verification subject no longer matches")
+
+            self._closed_at(task)
+            if task.get("mode") == "CAREFUL":
+                scheduled_due_at = self._scheduled_recall_due_at(task)
+                delayed_recall = (
+                    comprehension.get("delayed_recall")
+                    if isinstance(comprehension, dict)
+                    else None
+                )
+                if (
+                    isinstance(delayed_recall, dict)
+                    and delayed_recall.get("due_at") != scheduled_due_at.isoformat()
+                ):
+                    raise AnchorError("delayed recall record does not match its schedule")
+        except (AnchorError, KeyError, TypeError, ValueError) as error:
+            raise AnchorError(f"{prefix}: {error}") from error
+
 
     @staticmethod
     def _document_digest(document: Any) -> str:
         encoded = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
+    @classmethod
+    def _record_digest(cls, record: dict[str, Any]) -> str:
+        return cls._document_digest(
+            {key: value for key, value in record.items() if key != "record_digest"}
+        )
+
+    @classmethod
+    def _seal_post_close_record(
+        cls,
+        task: dict[str, Any],
+        record: dict[str, Any],
+        *,
+        record_type: str,
+    ) -> None:
+        integrity = task.get("post_close_integrity")
+        if not isinstance(integrity, dict):
+            record["record_digest"] = cls._record_digest(record)
+            return
+        head_sequence = integrity.get("head_sequence")
+        head_digest = integrity.get("head_digest")
+        if (
+            not isinstance(head_sequence, int)
+            or isinstance(head_sequence, bool)
+            or head_sequence < 0
+            or not isinstance(head_digest, str)
+        ):
+            raise AnchorError("Post-close integrity head is invalid.")
+        record.update(
+            {
+                "record_type": record_type,
+                "task_id": task.get("id"),
+                "sequence": head_sequence + 1,
+                "previous_digest": head_digest,
+            }
+        )
+        record["record_digest"] = cls._record_digest(record)
+        integrity["head_sequence"] = record["sequence"]
+        integrity["head_digest"] = record["record_digest"]
+
+    @classmethod
+    def _validate_post_close_integrity(cls, task: dict[str, Any]) -> None:
+        integrity = task.get("post_close_integrity")
+        if integrity is None:
+            return
+        if not isinstance(integrity, dict):
+            raise AnchorError("Post-close integrity discriminator must be an object.")
+        if integrity.get("format_version") != POST_CLOSE_INTEGRITY_FORMAT_VERSION:
+            raise AnchorError("Post-close integrity format version is invalid.")
+        head_sequence = integrity.get("head_sequence")
+        head_digest = integrity.get("head_digest")
+        if (
+            not isinstance(head_sequence, int)
+            or isinstance(head_sequence, bool)
+            or head_sequence < 0
+        ):
+            raise AnchorError("Post-close integrity head sequence is invalid.")
+        if (
+            not isinstance(head_digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", head_digest) is None
+        ):
+            raise AnchorError("Post-close integrity head digest is invalid.")
+        close_digest = task.get("close_digest")
+        if not isinstance(close_digest, str):
+            raise AnchorError("Post-close integrity requires a close digest anchor.")
+
+        records: list[tuple[dict[str, Any], str]] = []
+        comprehension = task.get("comprehension")
+        delayed_recall = (
+            comprehension.get("delayed_recall")
+            if isinstance(comprehension, dict)
+            else None
+        )
+        if isinstance(delayed_recall, dict):
+            records.append((delayed_recall, "delayed_recall"))
+        outcomes = task.get("post_completion_outcomes")
+        outcome_records = outcomes if isinstance(outcomes, list) else []
+        outcome_sequences = [
+            record.get("sequence")
+            for record in outcome_records
+            if isinstance(record, dict)
+        ]
+        try:
+            outcomes_are_ordered = outcome_sequences == sorted(outcome_sequences)
+        except TypeError as error:
+            raise AnchorError("Post-completion outcome record sequence is invalid.") from error
+        if not outcomes_are_ordered:
+            raise AnchorError("Post-completion outcome record order is invalid.")
+        records.extend(
+            (record, "post_completion_outcome")
+            for record in outcome_records
+            if isinstance(record, dict)
+        )
+        try:
+            ordered = sorted(records, key=lambda item: item[0].get("sequence"))
+        except TypeError as error:
+            raise AnchorError("Post-close record sequence is invalid.") from error
+        if len(ordered) != head_sequence:
+            raise AnchorError("Post-close record chain length does not match its head.")
+
+        previous_digest = close_digest
+        seen_digests: set[str] = set()
+        for expected_sequence, (record, expected_type) in enumerate(ordered, start=1):
+            if record.get("record_type") != expected_type:
+                raise AnchorError("Post-close record type does not match its storage location.")
+            if record.get("task_id") != task.get("id"):
+                raise AnchorError("Post-close record belongs to a different task.")
+            if record.get("sequence") != expected_sequence:
+                raise AnchorError("Post-close record sequence is not contiguous.")
+            if record.get("previous_digest") != previous_digest:
+                raise AnchorError("Post-close record previous digest does not match the chain.")
+            record_digest = record.get("record_digest")
+            if (
+                not isinstance(record_digest, str)
+                or record_digest != cls._record_digest(record)
+            ):
+                raise AnchorError("Post-close record digest does not match its contents.")
+            if record_digest in seen_digests:
+                raise AnchorError("Post-close record digest is duplicated.")
+            seen_digests.add(record_digest)
+            previous_digest = record_digest
+        if head_digest != previous_digest:
+            raise AnchorError("Post-close integrity head does not match the record chain.")
+
     @staticmethod
-    def _task_approval_subject(task: dict[str, Any]) -> dict[str, Any]:
+    def _post_close_record_integrity(
+        task: dict[str, Any],
+        record: dict[str, Any],
+    ) -> str | None:
+        if not record:
+            return None
+        if not isinstance(task.get("post_close_integrity"), dict):
+            return "legacy-unverified"
+        return (
+            "chain-verified"
+            if record.get("record_digest") is not None
+            else "legacy-unverified"
+        )
+
+    @classmethod
+    def _validate_task_change_baseline(cls, baseline: object) -> None:
+        if not isinstance(baseline, dict):
+            raise AnchorError("Anchor task change baseline must be an object.")
+        if baseline.get("format_version") != 1:
+            raise AnchorError("Anchor task change baseline has an invalid format version.")
+        source = baseline.get("source")
+        if source == "git":
+            head = cls._required_text(
+                baseline.get("head"),
+                "Anchor task Git baseline commit",
+            )
+            if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
+                raise AnchorError("Anchor task Git baseline commit is invalid.")
+            if not isinstance(baseline.get("project_prefix"), str):
+                raise AnchorError("Anchor task Git baseline project path is invalid.")
+            submodules = baseline.get("submodules", {})
+            if not isinstance(submodules, dict):
+                raise AnchorError("Anchor task Git submodule baselines are invalid.")
+            submodule_oids = baseline.get("submodule_oids", {})
+            if (
+                not isinstance(submodule_oids, dict)
+                or set(submodule_oids) != set(submodules)
+                or not all(
+                    isinstance(oid, str)
+                    and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid)
+                    is not None
+                    for oid in submodule_oids.values()
+                )
+            ):
+                raise AnchorError("Anchor task Git submodule OIDs are invalid.")
+            for path, nested in submodules.items():
+                parsed_path = Path(path) if isinstance(path, str) else None
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or parsed_path is None
+                    or parsed_path.is_absolute()
+                    or bool(parsed_path.drive)
+                    or bool(parsed_path.root)
+                    or ".." in parsed_path.parts
+                ):
+                    raise AnchorError("Anchor task Git submodule path is invalid.")
+                if nested is not None:
+                    cls._validate_task_change_baseline(nested)
+                    if nested.get("source") != "git":
+                        raise AnchorError(
+                            "Materialized Git submodules require a Git task baseline."
+                        )
+            return
+        if source == "filesystem":
+            entries = baseline.get("entries")
+            if not isinstance(entries, dict):
+                raise AnchorError("Anchor task filesystem baseline entries are invalid.")
+            git_context = baseline.get("git_context")
+            if git_context is not None and git_context not in {"none", "unborn"}:
+                raise AnchorError("Anchor task filesystem Git context is invalid.")
+            git_unborn = baseline.get("git_unborn")
+            if git_unborn is not None and git_unborn is not True:
+                raise AnchorError("Anchor task unborn Git baseline marker is invalid.")
+            if (git_unborn is True or git_context == "unborn") and not isinstance(
+                baseline.get("project_prefix"),
+                str,
+            ):
+                raise AnchorError("Anchor task unborn Git project path is invalid.")
+            for path, digest in entries.items():
+                parsed_path = Path(path) if isinstance(path, str) else None
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or parsed_path is None
+                    or parsed_path.is_absolute()
+                    or bool(parsed_path.drive)
+                    or bool(parsed_path.root)
+                    or ".." in parsed_path.parts
+                    or not isinstance(digest, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+                ):
+                    raise AnchorError(
+                        "Anchor task filesystem baseline entries are invalid."
+                    )
+            return
+        raise AnchorError("Anchor task change baseline source is invalid.")
+
+    @staticmethod
+    def _verification_metric_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+        metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
+        subject = {
+            field: metrics.get(field)
+            for field in (
+                "agent_turns",
+                "input_tokens",
+                "output_tokens",
+                "active_minutes",
+                "agent_provider",
+                "agent_model",
+                "provenance",
+            )
+        }
+        return subject
+
+    @classmethod
+    def _closed_task_subject(cls, task: dict[str, Any]) -> dict[str, Any]:
+        comprehension = task.get("comprehension")
+        close_comprehension = {
+            field: comprehension.get(field)
+            for field in (
+                "verification_check",
+                "recall_delay_hours",
+                "recall_due_at",
+            )
+        } if isinstance(comprehension, dict) else None
+        metrics = task.get("metrics") if isinstance(task.get("metrics"), dict) else {}
+        subject = {
+            "schema_version": task.get("schema_version"),
+            "task_id": task.get("id"),
+            "state": task.get("state"),
+            "created_at": task.get("created_at"),
+            "approval_subject": cls._task_approval_subject(task),
+            "approval": task.get("approval"),
+            "quality": task.get("quality"),
+            "verification": task.get("verification"),
+            "comprehension": close_comprehension,
+            "metrics": {
+                **cls._verification_metric_snapshot(task),
+                "closed_at": metrics.get("closed_at"),
+                "wall_seconds": metrics.get("wall_seconds"),
+            },
+        }
+        integrity = task.get("post_close_integrity")
+        if isinstance(integrity, dict):
+            subject["post_close_integrity_format"] = integrity.get("format_version")
+        return subject
+
+    @classmethod
+    def _closed_task_digest(cls, task: dict[str, Any]) -> str:
+        return cls._document_digest(cls._closed_task_subject(task))
+
+    @staticmethod
+    def _normalize_task_schema_for_approval(task: dict[str, Any]) -> None:
+        # A planned legacy-shaped record has no immutable approval yet, so this
+        # is the safe migration boundary. Preview and mutation must normalize
+        # identically or an interactive confirmation can never match.
+        if task.get("schema_version") is None:
+            task["schema_version"] = TASK_SCHEMA_VERSION
+
+    @classmethod
+    def _task_approval_subject(cls, task: dict[str, Any]) -> dict[str, Any]:
         comprehension = task.get("comprehension")
         # New records bind the immutable delay policy, not a timestamp that is
         # intentionally assigned only when the task closes. Preserve the old
@@ -2281,7 +3316,7 @@ class AnchorProject:
             }
         else:
             comprehension_policy = None
-        return {
+        subject = {
             "task_id": task.get("id"),
             "title": task.get("title"),
             "mode": task.get("mode"),
@@ -2293,6 +3328,14 @@ class AnchorProject:
             "comprehension_policy": comprehension_policy,
             "ruleset": task.get("ruleset"),
         }
+        if "change_baseline" in task:
+            subject["change_baseline"] = task.get("change_baseline")
+        if "schema_version" in task:
+            subject["schema_version"] = task.get("schema_version")
+        actual_diff_evidence = cls._actual_diff_revision_evidence(task)
+        if actual_diff_evidence:
+            subject["actual_diff_revision_evidence"] = actual_diff_evidence
+        return subject
 
     def _task_approval_digests(self, subject: dict[str, Any]) -> dict[str, str]:
         return {
@@ -2387,9 +3430,15 @@ class AnchorProject:
             "changed_artifacts": changed,
             "approval": approval,
             "ruleset": task.get("ruleset"),
+            "change_baseline": task.get("change_baseline"),
         }
         task.setdefault("approval_invalidations", []).append(invalidation)
-        for field in ("approval", "ruleset", "quality", "verification"):
+        for field in (
+            "approval",
+            "ruleset",
+            "quality",
+            "verification",
+        ):
             task.pop(field, None)
         if state == "briefing":
             invalidation["plan"] = task.pop("plan", None)
@@ -2450,8 +3499,24 @@ class AnchorProject:
                 "The task returned to review_ready; rerun: "
                 f"{display_command('precommit')}"
             )
-        current = workspace_fingerprint(self.root)
-        if current.get("digest") == recorded.get("digest"):
+        try:
+            current = workspace_fingerprint(self.root)
+        except GitInspectionError as error:
+            self._invalidate_quality(
+                task,
+                recorded_fingerprint=recorded,
+                current_fingerprint=None,
+                reason=f"The workspace can no longer be fingerprinted safely: {error}",
+            )
+            raise StateRecordedError(
+                "The workspace can no longer be fingerprinted safely. "
+                "The task returned to review_ready."
+            ) from error
+        if (
+            current.get("digest") == recorded.get("digest")
+            and current.get("git_state_digest")
+            == recorded.get("git_state_digest")
+        ):
             return
         self._invalidate_quality(
             task,
