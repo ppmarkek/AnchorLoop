@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +18,21 @@ _SECRET_ASSIGNMENT = re.compile(
 )
 _TASK_BASELINE_MAX_ENTRIES = 100_000
 _TASK_BASELINE_MAX_BYTES = 512 * 1024 * 1024
+_HISTORY_SCAN_MAX_OBJECTS = 100_000
+_HISTORY_SCAN_MAX_COMMITS = 1_000
+_HISTORY_SCAN_MAX_BYTES = 64 * 1024 * 1024
+_GIT_OBJECT_ID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class GitInspectionError(RuntimeError):
     """A required task-baseline query could not be completed safely."""
+
+
+@dataclass
+class _HistoryScanBudget:
+    objects: int = 0
+    bytes: int = 0
 
 
 def run_precommit(
@@ -53,7 +64,9 @@ def run_precommit(
             }
         )
     else:
-        secret_findings = _secret_findings(documents)
+        secret_findings = _secret_findings(
+            _security_source_documents(root, baseline=baseline, documents=documents)
+        )
         if secret_findings:
             findings.extend(secret_findings)
             checks.append({"name": "secret-baseline", "status": "failed"})
@@ -664,6 +677,592 @@ def _source_documents(
         if _is_supported_source_file(root, path)
     ]
     return _worktree_source_documents(root, names)
+
+
+def _security_source_documents(
+    root: Path,
+    *,
+    baseline: dict[str, Any] | None,
+    documents: list[tuple[str, str, bytes]],
+) -> list[tuple[str, str, bytes]]:
+    """Add each new historical source blob once for the security scan only.
+
+    Syntax and ownership checks intentionally retain their material-diff
+    semantics. A credential is different: even a reverted blob is reachable
+    from the branch and would be pushed, so security must inspect the complete
+    approved-baseline-to-HEAD history.
+    """
+
+    historical = _git_history_source_documents(
+        root,
+        baseline=baseline,
+        budget=_HistoryScanBudget(),
+    )
+    if not historical:
+        return documents
+    known_contents = {
+        hashlib.sha256(content).digest()
+        for _, _, content in documents
+    }
+    combined = list(documents)
+    for document in historical:
+        content_digest = hashlib.sha256(document[2]).digest()
+        if content_digest in known_contents:
+            continue
+        known_contents.add(content_digest)
+        combined.append(document)
+    return combined
+
+
+def _git_history_source_documents(
+    root: Path,
+    *,
+    baseline: dict[str, Any] | None,
+    display_prefix: str = "",
+    ancestors: frozenset[str] = frozenset(),
+    budget: _HistoryScanBudget,
+) -> list[tuple[str, str, bytes]]:
+    """Return source blobs newly reachable after an approved Git baseline."""
+
+    if not isinstance(baseline, dict):
+        return []
+    source = baseline.get("source")
+    if source == "filesystem":
+        # An unborn repository has no commit object to bind the approval to.
+        # Once it has a HEAD, inspect all reachable objects rather than letting
+        # a first-commit secret disappear behind a later committed revert.
+        git_present, head_exists = _filesystem_git_state(root, baseline)
+        if not git_present or not head_exists:
+            return []
+        context = _validated_git_context(root, strict=True)
+        if context is None:
+            raise GitInspectionError("Required Git history context is unavailable.")
+        head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
+        if head is None:
+            raise GitInspectionError("Required Git history HEAD is unavailable.")
+        return _git_full_history_source_documents(
+            root,
+            commit=head.decode("ascii", errors="strict").strip(),
+            display_prefix=display_prefix,
+            ancestors=ancestors,
+            budget=budget,
+        )
+    if source != "git":
+        return []
+
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        raise GitInspectionError("Git submodule cycle detected during history inspection.")
+    context = _validated_git_context(root, strict=True)
+    if context is None:
+        raise GitInspectionError("Required Git history context is unavailable.")
+    baseline_head = baseline.get("head")
+    if not isinstance(baseline_head, str) or re.fullmatch(
+        r"(?:[0-9a-f]{40}|[0-9a-f]{64})", baseline_head
+    ) is None:
+        raise GitInspectionError("The approved Git baseline commit is invalid.")
+    expected_prefix = baseline.get("project_prefix")
+    if not isinstance(expected_prefix, str) or context[1] != expected_prefix:
+        raise GitInspectionError(
+            "The approved Git baseline belongs to a different project path."
+        )
+    current_head = _git_bytes(root, "rev-parse", "--verify", "HEAD")
+    if current_head is None:
+        raise GitInspectionError("Required Git history HEAD is unavailable.")
+    current_head_text = current_head.decode("ascii", errors="strict").strip()
+    if _git_bytes(root, "merge-base", "--is-ancestor", baseline_head, current_head_text) is None:
+        raise GitInspectionError("The approved Git baseline is no longer an ancestor of HEAD.")
+    submodules = baseline.get("submodules", {})
+    if not isinstance(submodules, dict):
+        raise GitInspectionError("The approved Git submodule baseline is invalid.")
+    approved_gitlinks = baseline.get("submodule_oids", {})
+    if (
+        not isinstance(approved_gitlinks, dict)
+        or set(approved_gitlinks) != set(submodules)
+        or not all(
+            isinstance(object_id, str)
+            and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", object_id)
+            is not None
+            for object_id in approved_gitlinks.values()
+        )
+    ):
+        raise GitInspectionError("The approved Git submodule OIDs are invalid.")
+    current_gitlinks = _gitlink_paths(root, treeish=current_head_text)
+    if set(current_gitlinks) != set(submodules):
+        raise GitInspectionError(
+            "The approved Git submodule set changed in parent history."
+        )
+
+    allowed_gitlinks: dict[str, str] = {}
+    materialized_submodules: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for name, nested_baseline in sorted(submodules.items()):
+        approved_gitlink = approved_gitlinks[name]
+        current_gitlink = current_gitlinks[name]
+        if nested_baseline is None:
+            # An unmaterialized child has no baseline repository we can scan.
+            # It must therefore remain pinned to its approved gitlink; accepting
+            # a parent-tree advance would let a secret be introduced and reverted
+            # entirely inside the unavailable child history.
+            if current_gitlink != approved_gitlink:
+                raise GitInspectionError(
+                    "Git history contains an unmaterialized submodule transition "
+                    f"that cannot be inspected safely: {name}"
+                )
+            continue
+        if not isinstance(nested_baseline, dict):
+            raise GitInspectionError("The approved Git submodule baseline is invalid.")
+        nested_root = _materialized_submodule_root(root, name)
+        if nested_root is None:
+            raise GitInspectionError(
+                f"Git submodule baseline is unavailable after approval: {name}"
+            )
+        nested_head = _git_bytes(nested_root, "rev-parse", "--verify", "HEAD")
+        if (
+            nested_head is None
+            or (
+                current_gitlink != approved_gitlink
+                and nested_head.decode("ascii", errors="strict").strip()
+                != current_gitlink
+            )
+        ):
+            raise GitInspectionError(
+                f"Git submodule materialized commit does not match parent HEAD: {name}"
+            )
+        allowed_gitlinks[name] = current_gitlink
+        materialized_submodules[name] = (nested_root, nested_baseline)
+
+    documents = _git_history_blob_documents(
+        root,
+        revision=f"{baseline_head}..{current_head_text}",
+        repository_prefix=context[1],
+        display_prefix=display_prefix,
+        budget=budget,
+        allowed_gitlinks=allowed_gitlinks,
+    )
+    for name, (nested_root, nested_baseline) in sorted(materialized_submodules.items()):
+        documents.extend(
+            _git_history_source_documents(
+                nested_root,
+                baseline=nested_baseline,
+                display_prefix=f"{display_prefix}{name}/",
+                ancestors=ancestors | {identity},
+                budget=budget,
+            )
+        )
+    return documents
+
+
+def _git_full_history_source_documents(
+    root: Path,
+    *,
+    commit: str,
+    display_prefix: str,
+    ancestors: frozenset[str],
+    budget: _HistoryScanBudget,
+) -> list[tuple[str, str, bytes]]:
+    """Scan a complete Git history when approval predates the first commit."""
+
+    identity = os.path.normcase(str(root.resolve()))
+    if identity in ancestors:
+        raise GitInspectionError("Git submodule cycle detected during history inspection.")
+    context = _validated_git_context(root, strict=True)
+    if context is None or _git_bytes(root, "cat-file", "-e", f"{commit}^{{commit}}") is None:
+        raise GitInspectionError("Required Git history commit is unavailable.")
+    documents = _git_history_blob_documents(
+        root,
+        revision=commit,
+        repository_prefix=context[1],
+        display_prefix=display_prefix,
+        budget=budget,
+        allowed_gitlinks=_gitlink_paths(root, treeish=commit),
+    )
+    for name, nested_commit in sorted(_gitlink_paths(root, treeish=commit).items()):
+        nested_root = _materialized_submodule_root(root, name)
+        if nested_root is None:
+            raise GitInspectionError(
+                f"Git history submodule is not materialized: {display_prefix}{name}"
+            )
+        nested_head = _git_bytes(nested_root, "rev-parse", "--verify", "HEAD")
+        if (
+            nested_head is None
+            or nested_head.decode("ascii", errors="strict").strip() != nested_commit
+        ):
+            raise GitInspectionError(
+                f"Git history submodule index and materialized commit disagree: "
+                f"{display_prefix}{name}"
+            )
+        documents.extend(
+            _git_full_history_source_documents(
+                nested_root,
+                commit=nested_commit,
+                display_prefix=f"{display_prefix}{name}/",
+                ancestors=ancestors | {identity},
+                budget=budget,
+            )
+        )
+    return documents
+
+
+def _git_history_blob_documents(
+    root: Path,
+    *,
+    revision: str,
+    repository_prefix: str,
+    display_prefix: str,
+    budget: _HistoryScanBudget,
+    allowed_gitlinks: dict[str, str],
+) -> list[tuple[str, str, bytes]]:
+    """Read bounded, supported source blobs from a Git object revision set."""
+
+    object_paths = _git_history_object_paths(
+        root,
+        revision=revision,
+        repository_prefix=repository_prefix,
+        budget=budget,
+        allowed_gitlinks=allowed_gitlinks,
+    )
+    if not object_paths:
+        return []
+    object_ids = sorted(object_paths)
+    checked = _git_bytes(
+        root,
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        input_data=b"\n".join(object_ids) + b"\n",
+    )
+    if checked is None:
+        raise GitInspectionError("Required Git history object inspection failed.")
+    records = checked.splitlines()
+    if len(records) != len(object_ids):
+        raise GitInspectionError("Git history object inspection returned incomplete records.")
+
+    blobs: list[tuple[bytes, int, str]] = []
+    for object_id, record in zip(object_ids, records, strict=True):
+        fields = record.split(b" ", 2)
+        if len(fields) != 3 or fields[0] != object_id:
+            raise GitInspectionError("Git history object inspection returned a malformed record.")
+        object_type = fields[1]
+        if object_type == b"missing":
+            raise GitInspectionError("A required Git history object is unavailable.")
+        if object_type != b"blob":
+            continue
+        try:
+            size = int(fields[2])
+        except ValueError as error:
+            raise GitInspectionError(
+                "Git history object inspection returned an invalid size."
+            ) from error
+        if size < 0 or size > _HISTORY_SCAN_MAX_BYTES - budget.bytes:
+            raise GitInspectionError(
+                f"Git history blob byte limit exceeded ({_HISTORY_SCAN_MAX_BYTES})."
+            )
+        budget.bytes += size
+        blobs.append((object_id, size, object_paths[object_id]))
+    if not blobs:
+        return []
+
+    content_output = _git_bytes(
+        root,
+        "cat-file",
+        "--batch",
+        input_data=b"\n".join(object_id for object_id, _, _ in blobs) + b"\n",
+    )
+    if content_output is None:
+        raise GitInspectionError("Required Git history blob read failed.")
+    position = 0
+    documents: list[tuple[str, str, bytes]] = []
+    for object_id, size, name in blobs:
+        header_end = content_output.find(b"\n", position)
+        expected_header = object_id + b" blob " + str(size).encode("ascii")
+        if header_end < 0 or content_output[position:header_end] != expected_header:
+            raise GitInspectionError("Git history blob read returned a malformed record.")
+        position = header_end + 1
+        content_end = position + size
+        content = content_output[position:content_end]
+        if len(content) != size or content_output[content_end:content_end + 1] != b"\n":
+            raise GitInspectionError("Git history blob read returned incomplete content.")
+        position = content_end + 1
+        documents.append((f"{display_prefix}{name}", "history", content))
+    if position != len(content_output):
+        raise GitInspectionError("Git history blob read returned unexpected trailing data.")
+    return documents
+
+
+def _git_history_object_paths(
+    root: Path,
+    *,
+    revision: str,
+    repository_prefix: str,
+    budget: _HistoryScanBudget,
+    allowed_gitlinks: dict[str, str],
+) -> dict[bytes, str]:
+    """Map every historical source-path transition to its new blob.
+
+    ``rev-list --objects`` emits at most one arbitrary path hint for a blob.
+    That is unsafe when one blob is reachable at both a supported and an
+    unsupported path. Enumerating each reachable commit's raw tree transition
+    preserves all paths, including merged side-branch commits.
+    """
+
+    object_paths: dict[bytes, str] = {}
+    for commit in _git_history_commit_ids(root, revision=revision, budget=budget):
+        _git_history_commit_object_paths(
+            root,
+            commit=commit,
+            repository_prefix=repository_prefix,
+            object_paths=object_paths,
+            budget=budget,
+            allowed_gitlinks=allowed_gitlinks,
+        )
+    return object_paths
+
+
+def _git_history_commit_ids(
+    root: Path,
+    *,
+    revision: str,
+    budget: _HistoryScanBudget,
+) -> list[str]:
+    commits: list[str] = []
+
+    def collect(record: bytes) -> None:
+        if _GIT_OBJECT_ID.fullmatch(record) is None:
+            raise GitInspectionError(
+                "Git history enumeration returned a malformed commit ID."
+            )
+        if len(commits) >= _HISTORY_SCAN_MAX_COMMITS:
+            raise GitInspectionError(
+                f"Git history commit limit exceeded ({_HISTORY_SCAN_MAX_COMMITS})."
+            )
+        _consume_history_object_budget(budget)
+        commits.append(record.decode("ascii"))
+
+    _stream_git_line_records(
+        root,
+        ("rev-list", "--full-history", revision, "--", "."),
+        collect,
+        operation="history enumeration",
+    )
+    return commits
+
+
+def _git_history_commit_object_paths(
+    root: Path,
+    *,
+    commit: str,
+    repository_prefix: str,
+    object_paths: dict[bytes, str],
+    budget: _HistoryScanBudget,
+    allowed_gitlinks: dict[str, str],
+) -> None:
+    pending_object: bytes | None = None
+    pending_gitlink = False
+
+    def collect(record: bytes) -> None:
+        nonlocal pending_gitlink, pending_object
+        if pending_object is None:
+            fields = record.split()
+            if (
+                len(fields) != 5
+                or not fields[0].startswith(b":")
+                or _GIT_OBJECT_ID.fullmatch(fields[3]) is None
+                or fields[4] not in {b"A", b"M", b"T"}
+            ):
+                raise GitInspectionError(
+                    "Git history enumeration returned a malformed tree transition."
+                )
+            _consume_history_object_budget(budget)
+            pending_object = fields[3]
+            pending_gitlink = fields[1] == b"160000"
+            return
+        if pending_gitlink:
+            name = _git_history_relative_name(
+                record,
+                repository_prefix=repository_prefix,
+            )
+            expected_gitlink = allowed_gitlinks.get(name) if name is not None else None
+            if expected_gitlink != pending_object.decode("ascii"):
+                raise GitInspectionError(
+                    "Git history contains a submodule transition that cannot "
+                    "be inspected safely."
+                )
+            pending_gitlink = False
+            pending_object = None
+            return
+        name = _git_history_source_name(
+            record,
+            repository_prefix=repository_prefix,
+        )
+        if name is not None:
+            existing_name = object_paths.get(pending_object)
+            if existing_name is None or name < existing_name:
+                object_paths[pending_object] = name
+        pending_object = None
+
+    _stream_git_nul_records(
+        root,
+        (
+            "diff-tree",
+            "--root",
+            "-m",
+            "-r",
+            "--no-commit-id",
+            "--no-renames",
+            "--diff-filter=AMT",
+            "--raw",
+            "-z",
+            commit,
+            "--",
+            ".",
+        ),
+        collect,
+        operation="history tree enumeration",
+    )
+    if pending_object is not None or pending_gitlink:
+        raise GitInspectionError(
+            "Git history enumeration returned an incomplete tree transition."
+        )
+
+
+def _consume_history_object_budget(budget: _HistoryScanBudget) -> None:
+    budget.objects += 1
+    if budget.objects > _HISTORY_SCAN_MAX_OBJECTS:
+        raise GitInspectionError(
+            f"Git history object limit exceeded ({_HISTORY_SCAN_MAX_OBJECTS})."
+        )
+
+
+def _stream_git_line_records(
+    root: Path,
+    arguments: tuple[str, ...],
+    on_record: Any,
+    *,
+    operation: str,
+) -> None:
+    """Call Git and feed newline-delimited records without unbounded buffering."""
+
+    _stream_git_records(
+        root,
+        arguments,
+        on_record,
+        delimiter=b"\n",
+        operation=operation,
+    )
+
+
+def _stream_git_nul_records(
+    root: Path,
+    arguments: tuple[str, ...],
+    on_record: Any,
+    *,
+    operation: str,
+) -> None:
+    """Call Git and feed NUL-delimited records without unbounded buffering."""
+
+    _stream_git_records(
+        root,
+        arguments,
+        on_record,
+        delimiter=b"\0",
+        operation=operation,
+    )
+
+
+def _stream_git_records(
+    root: Path,
+    arguments: tuple[str, ...],
+    on_record: Any,
+    *,
+    delimiter: bytes,
+    operation: str,
+) -> None:
+    """Call Git and feed delimited records without unbounded buffering."""
+
+    try:
+        process = subprocess.Popen(
+            ["git", "--no-replace-objects", *arguments],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_git_environment(),
+        )
+    except OSError as error:
+        raise GitInspectionError(f"Required Git {operation} failed.") from error
+    stream = process.stdout
+    if stream is None:
+        process.terminate()
+        process.wait()
+        raise GitInspectionError(f"Required Git {operation} has no output stream.")
+    buffered = b""
+    try:
+        while chunk := stream.read(64 * 1024):
+            buffered += chunk
+            if len(buffered) > 1024 * 1024:
+                raise GitInspectionError(
+                    f"Git {operation} returned an oversized record."
+                )
+            records = buffered.split(delimiter)
+            buffered = records.pop()
+            for record in records:
+                on_record(record)
+        if buffered:
+            raise GitInspectionError(
+                f"Git {operation} returned an unterminated record."
+            )
+        if process.wait() != 0:
+            raise GitInspectionError(f"Required Git {operation} failed.")
+    except OSError as error:
+        raise GitInspectionError(f"Required Git {operation} failed.") from error
+    finally:
+        stream.close()
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+
+
+def _git_history_source_name(
+    encoded_name: bytes,
+    *,
+    repository_prefix: str,
+) -> str | None:
+    name = _git_history_relative_name(
+        encoded_name,
+        repository_prefix=repository_prefix,
+    )
+    if name is None:
+        return None
+    if name == ".anchor" or name.startswith(".anchor/"):
+        return None
+    if os.name == "nt" and "\\" in name:
+        raise GitInspectionError(
+            "Git history contains a path that cannot be inspected safely on Windows."
+        )
+    return name if _is_supported_source_name(name) else None
+
+
+def _git_history_relative_name(
+    encoded_name: bytes,
+    *,
+    repository_prefix: str,
+) -> str | None:
+    """Return a validated Git path relative to the inspected project root."""
+
+    prefix = repository_prefix.encode("utf-8", errors="surrogateescape").strip(b"/")
+    if prefix:
+        expected_prefix = prefix + b"/"
+        if not encoded_name.startswith(expected_prefix):
+            return None
+        encoded_name = encoded_name[len(expected_prefix):]
+    name = encoded_name.decode("utf-8", errors="surrogateescape")
+    while name.startswith("./"):
+        name = name[2:]
+    if (
+        not name
+        or name.startswith("/")
+        or ".." in name.split("/")
+    ):
+        raise GitInspectionError("Git history enumeration returned an unsafe path.")
+    return name
 
 
 def _git_source_documents(

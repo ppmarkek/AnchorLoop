@@ -10,7 +10,7 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 **Published production:** `anchorloop@0.1.0`
 
-**Unreleased main:** `0.2.0` release candidate
+**Unreleased candidate:** `0.2.0` release candidate
 
 The published `0.1.0` package remains the production version. The current
 release branch contains the unreleased recovery, validation, ownership,

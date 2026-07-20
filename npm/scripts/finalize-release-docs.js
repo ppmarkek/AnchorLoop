@@ -169,7 +169,7 @@ function releaseDocumentSpecs(version, releaseDate) {
           source: lines(
             `**Published production:** \`${previousPackage}\``,
             "",
-            `**Unreleased main:** \`${version}\` release candidate`,
+            `**Unreleased candidate:** \`${version}\` release candidate`,
             "",
             `The published \`${PREVIOUS_PRODUCTION_VERSION}\` package remains the production version. The current`,
             "release branch contains the unreleased recovery, validation, ownership,",

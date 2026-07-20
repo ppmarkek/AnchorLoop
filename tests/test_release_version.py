@@ -245,7 +245,7 @@ class ReleaseVersionTests(unittest.TestCase):
         translations = sorted((root / "docs" / "i18n").glob("README.*.md"))
 
         self.assertIn("**Published production:** `anchorloop@0.1.0`", readme)
-        self.assertIn("**Unreleased main:** `0.2.0` release candidate", readme)
+        self.assertIn("**Unreleased candidate:** `0.2.0` release candidate", readme)
         self.assertNotIn("**Published production:** `anchorloop@0.2.0`", readme)
         self.assertIn('src="docs/assets/anchorloop-delivery-loop.svg"', readme)
         self.assertIn('src="docs/assets/anchorloop-evidence-integrity.svg"', readme)

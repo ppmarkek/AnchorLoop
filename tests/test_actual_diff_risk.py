@@ -41,6 +41,13 @@ class ActualDiffRiskTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
 
+    @staticmethod
+    def _same_path(candidate: object, expected: Path) -> bool:
+        try:
+            return os.path.samefile(os.fspath(candidate), os.fspath(expected))
+        except (OSError, TypeError):
+            return False
+
     def _init_git(self, root: Path) -> None:
         self._git(root, "init", "--quiet")
         self._git(root, "config", "user.name", "AnchorLoop Tests")
@@ -339,6 +346,244 @@ class ActualDiffRiskTests(unittest.TestCase):
                 )
             )
 
+    def test_secret_commit_then_revert_still_blocks_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            project = self._implementing_project(root, active_security=True)
+            self._commit_file(
+                root,
+                "src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._commit_file(root, "src/config.py", "API_KEY = None\n")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
+    def test_private_key_commit_then_delete_still_blocks_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            project = self._implementing_project(root, active_security=True)
+            self._commit_file(
+                root,
+                "src/config.py",
+                "-----BEGIN PRIVATE KEY-----\n"
+                "not-a-real-key\n"
+                "-----END PRIVATE KEY-----\n",
+            )
+            self._git(root, "rm", "--quiet", "--", "src/config.py")
+            self._git(root, "commit", "--quiet", "-m", "remove private key")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
+    def test_secret_inside_merged_commit_still_blocks_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            project = self._implementing_project(root, active_security=True)
+            self._git(root, "checkout", "--quiet", "-b", "secret-history")
+            self._commit_file(
+                root,
+                "src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._git(root, "checkout", "--quiet", "-")
+            self._git(
+                root,
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "secret-history",
+                "-m",
+                "merge secret history",
+            )
+            self._commit_file(root, "src/config.py", "API_KEY = None\n")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
+    def test_duplicate_history_blob_is_scanned_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            project = self._implementing_project(root, active_security=True)
+            secret = 'API_KEY = "abcdefgh-secret-value"\n'
+            self._commit_file(root, "src/first.py", secret)
+            self._commit_file(root, "src/second.py", secret)
+            self._git(root, "rm", "--quiet", "--", "src/first.py", "src/second.py")
+            self._git(root, "commit", "--quiet", "-m", "remove duplicate secrets")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+            task = json.loads(project.active_task_path.read_text(encoding="utf-8"))
+            history_findings = [
+                finding
+                for finding in task["quality"][-1]["findings"]
+                if finding["category"] == "secret"
+                and "[history]" in finding["location"]
+            ]
+            self.assertEqual(len(history_findings), 1)
+
+    def test_history_blob_limits_fail_closed(self) -> None:
+        cases = (
+            (
+                "_HISTORY_SCAN_MAX_COMMITS",
+                0,
+                "history commit limit exceeded",
+            ),
+            (
+                "_HISTORY_SCAN_MAX_OBJECTS",
+                1,
+                "history object limit exceeded",
+            ),
+            (
+                "_HISTORY_SCAN_MAX_BYTES",
+                1,
+                "history blob byte limit exceeded",
+            ),
+        )
+        for setting, limit, message in cases:
+            with self.subTest(setting=setting), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._init_git(root)
+                self._commit_file(root, "README.md")
+                project = self._implementing_project(root, active_security=True)
+                self._commit_file(root, "src/new.py", "VALUE = 1\n")
+                project.transition("review")
+
+                with (
+                    mock.patch(f"anchorloop.quality.{setting}", limit),
+                    self.assertRaisesRegex(AnchorError, message),
+                ):
+                    project.precommit()
+
+    def test_nested_project_history_secret_uses_project_relative_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self._init_git(repository)
+            root = repository / "nested-project"
+            self._commit_file(repository, "nested-project/README.md")
+            project = self._implementing_project(root, active_security=True)
+            self._commit_file(
+                repository,
+                "nested-project/src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._commit_file(
+                repository,
+                "nested-project/src/config.py",
+                "API_KEY = None\n",
+            )
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+            task = json.loads(project.active_task_path.read_text(encoding="utf-8"))
+            history_locations = [
+                finding["location"]
+                for finding in task["quality"][-1]["findings"]
+                if finding["category"] == "secret"
+                and "[history]" in finding["location"]
+            ]
+            self.assertEqual(history_locations, ["src/config.py [history]:1"])
+
+    def test_nested_project_history_scans_a_blob_aliased_outside_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self._init_git(repository)
+            root = repository / "nested-project"
+            self._commit_file(repository, "nested-project/README.md")
+            project = self._implementing_project(root, active_security=True)
+            secret = 'API_KEY = "abcdefgh-secret-value"\n'
+            self._commit_file(repository, "aaa/duplicate.py", secret)
+            self._commit_file(repository, "nested-project/src/config.py", secret)
+            self._commit_file(
+                repository,
+                "nested-project/src/config.py",
+                "API_KEY = None\n",
+            )
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
+    def test_nested_history_budget_ignores_unrelated_commits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            self._init_git(repository)
+            root = repository / "nested-project"
+            self._commit_file(repository, "nested-project/README.md")
+            project = self._implementing_project(root, active_security=True)
+            for index in range(3):
+                self._commit_file(
+                    repository,
+                    f"outside/change-{index}.py",
+                    f"VALUE = {index}\n",
+                )
+            self._commit_file(
+                repository,
+                "nested-project/src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._commit_file(
+                repository,
+                "nested-project/src/config.py",
+                "API_KEY = None\n",
+            )
+            project.transition("review")
+
+            with (
+                mock.patch("anchorloop.quality._HISTORY_SCAN_MAX_OBJECTS", 4),
+                self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"),
+            ):
+                project.precommit()
+
+    def test_history_scans_a_blob_aliased_to_an_unsupported_root_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            project = self._implementing_project(root, active_security=True)
+            secret = 'API_KEY = "abcdefgh-secret-value"\n'
+            self._commit_file(root, "asset.bin", secret)
+            self._commit_file(root, "src/config.py", secret)
+            self._commit_file(root, "src/config.py", "API_KEY = None\n")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot create literal backslash names")
+    def test_history_scans_literal_backslash_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            project = self._implementing_project(root, active_security=True)
+            relative = ".anchor\\config.py"
+            self._commit_file(
+                root,
+                relative,
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._git(root, "rm", "--quiet", "--", relative)
+            self._git(root, "commit", "--quiet", "-m", "remove secret")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
     def test_staged_secret_cannot_be_masked_by_safe_unstaged_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -379,6 +624,23 @@ class ActualDiffRiskTests(unittest.TestCase):
             self._git(root, "commit", "--quiet", "-m", "malicious first commit")
             config.write_text("API_KEY = None\n", encoding="utf-8")
             project.transition("review")
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+
+    def test_unborn_git_secret_commit_then_revert_still_blocks_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._init_git(root)
+            config = root / "src" / "config.py"
+            config.parent.mkdir(parents=True)
+            config.write_text("API_KEY = None\n", encoding="utf-8")
+            project = self._implementing_project(root, active_security=True)
+            config.write_text('API_KEY = "abcdefgh-secret-value"\n', encoding="utf-8")
+            self._git(root, "add", "--", "src/config.py")
+            self._git(root, "commit", "--quiet", "-m", "commit secret")
+            self._commit_file(root, "src/config.py", "API_KEY = None\n")
+            project.transition("review")
+
             with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
                 project.precommit()
 
@@ -522,6 +784,312 @@ class ActualDiffRiskTests(unittest.TestCase):
                 r"vendor/library/auth/permissions\.py",
             ):
                 project.transition("review")
+
+    def test_unborn_git_submodule_secret_commit_then_revert_blocks_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            self._init_git(source)
+            self._commit_file(source, "src/config.py", "API_KEY = None\n")
+
+            root = base / "project"
+            root.mkdir()
+            self._init_git(root)
+            self._git(
+                root,
+                "-c",
+                "protocol.file.allow=always",
+                "clone",
+                "--quiet",
+                str(source),
+                "vendor/library",
+            )
+            project = self._implementing_project(root, active_security=True)
+
+            library = root / "vendor" / "library"
+            self._git(library, "config", "user.name", "AnchorLoop Tests")
+            self._git(
+                library,
+                "config",
+                "user.email",
+                "anchorloop-tests@example.invalid",
+            )
+            self._commit_file(
+                library,
+                "src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._commit_file(library, "src/config.py", "API_KEY = None\n")
+            (root / ".gitmodules").write_text(
+                "[submodule \"vendor/library\"]\n"
+                "\tpath = vendor/library\n"
+                f"\turl = {source.as_posix()}\n",
+                encoding="utf-8",
+            )
+            library_head = self._git_output(library, "rev-parse", "HEAD")
+            self._git(root, "add", "--", ".gitmodules")
+            self._git(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                library_head,
+                "vendor/library",
+            )
+            self._git(root, "commit", "--quiet", "-m", "add library")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "Pre-commit is blocked"):
+                project.precommit()
+            task = json.loads(project.active_task_path.read_text(encoding="utf-8"))
+            self.assertTrue(
+                any(
+                    finding["location"]
+                    == "vendor/library/src/config.py [history]:1"
+                    for finding in task["quality"][-1]["findings"]
+                )
+            )
+
+    def test_unborn_git_safe_submodule_history_passes_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            self._init_git(source)
+            self._commit_file(source, "src/config.py", "API_KEY = None\n")
+
+            root = base / "project"
+            root.mkdir()
+            self._init_git(root)
+            self._git(
+                root,
+                "-c",
+                "protocol.file.allow=always",
+                "clone",
+                "--quiet",
+                str(source),
+                "vendor/library",
+            )
+            project = self._implementing_project(root, active_security=True)
+            (root / ".gitmodules").write_text(
+                "[submodule \"vendor/library\"]\n"
+                "\tpath = vendor/library\n"
+                f"\turl = {source.as_posix()}\n",
+                encoding="utf-8",
+            )
+            library_head = self._git_output(
+                root / "vendor" / "library",
+                "rev-parse",
+                "HEAD",
+            )
+            self._git(root, "add", "--", ".gitmodules")
+            self._git(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                library_head,
+                "vendor/library",
+            )
+            self._git(root, "commit", "--quiet", "-m", "add library")
+            project.transition("review")
+
+            checked = project.precommit()
+
+            self.assertEqual(checked["state"], "quality_checked")
+
+    def test_intermediate_submodule_gitlink_transition_blocks_precommit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            self._init_git(source)
+            self._commit_file(source, "src/config.py", "API_KEY = None\n")
+            source_head = self._git_output(source, "rev-parse", "HEAD")
+
+            root = base / "project"
+            root.mkdir()
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            self._git(
+                root,
+                "-c",
+                "protocol.file.allow=always",
+                "clone",
+                "--quiet",
+                str(source),
+                "vendor/library",
+            )
+            (root / ".gitmodules").write_text(
+                "[submodule \"vendor/library\"]\n"
+                "\tpath = vendor/library\n"
+                f"\turl = {source.as_posix()}\n",
+                encoding="utf-8",
+            )
+            self._git(root, "add", "--", ".gitmodules")
+            self._git(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                source_head,
+                "vendor/library",
+            )
+            self._git(root, "commit", "--quiet", "-m", "add library")
+            library = root / "vendor" / "library"
+            self._git(library, "config", "user.name", "AnchorLoop Tests")
+            self._git(
+                library,
+                "config",
+                "user.email",
+                "anchorloop-tests@example.invalid",
+            )
+            project = self._implementing_project(root, active_security=True)
+
+            self._commit_file(
+                library,
+                "src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._git(root, "add", "--", "vendor/library")
+            self._git(root, "commit", "--quiet", "-m", "point at secret")
+            self._git(library, "checkout", "--quiet", source_head)
+            self._git(root, "add", "--", "vendor/library")
+            self._git(root, "commit", "--quiet", "-m", "restore library baseline")
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "submodule transition"):
+                project.precommit()
+
+    def test_unmaterialized_submodule_history_transition_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            self._init_git(source)
+            self._commit_file(source, "src/config.py", "API_KEY = None\n")
+            approved_head = self._git_output(source, "rev-parse", "HEAD")
+
+            root = base / "project"
+            root.mkdir()
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            self._git(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                approved_head,
+                "vendor/library",
+            )
+            self._git(root, "commit", "--quiet", "-m", "track unmaterialized library")
+            project = self._implementing_project(root, active_security=True)
+
+            self._commit_file(
+                source,
+                "src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._commit_file(source, "src/config.py", "API_KEY = None\n")
+            safe_head = self._git_output(source, "rev-parse", "HEAD")
+            self._git(
+                root,
+                "update-index",
+                "--cacheinfo",
+                "160000",
+                safe_head,
+                "vendor/library",
+            )
+            self._git(root, "commit", "--quiet", "-m", "advance unmaterialized library")
+            self._git(
+                root,
+                "update-index",
+                "--cacheinfo",
+                "160000",
+                approved_head,
+                "vendor/library",
+            )
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "submodule transition"):
+                project.precommit()
+
+    def test_materialized_submodule_history_must_match_parent_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            self._init_git(source)
+            self._commit_file(source, "src/config.py", "API_KEY = None\n")
+            approved_head = self._git_output(source, "rev-parse", "HEAD")
+
+            root = base / "project"
+            root.mkdir()
+            self._init_git(root)
+            self._commit_file(root, "README.md")
+            self._git(
+                root,
+                "-c",
+                "protocol.file.allow=always",
+                "clone",
+                "--quiet",
+                str(source),
+                "vendor/library",
+            )
+            (root / ".gitmodules").write_text(
+                "[submodule \"vendor/library\"]\n"
+                "\tpath = vendor/library\n"
+                f"\turl = {source.as_posix()}\n",
+                encoding="utf-8",
+            )
+            self._git(root, "add", "--", ".gitmodules")
+            self._git(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                approved_head,
+                "vendor/library",
+            )
+            self._git(root, "commit", "--quiet", "-m", "track materialized library")
+            project = self._implementing_project(root, active_security=True)
+
+            library = root / "vendor" / "library"
+            self._git(library, "config", "user.name", "AnchorLoop Tests")
+            self._git(
+                library,
+                "config",
+                "user.email",
+                "anchorloop-tests@example.invalid",
+            )
+            self._commit_file(
+                library,
+                "src/config.py",
+                'API_KEY = "abcdefgh-secret-value"\n',
+            )
+            self._commit_file(library, "src/config.py", "API_KEY = None\n")
+            safe_head = self._git_output(library, "rev-parse", "HEAD")
+            self._git(root, "add", "--", "vendor/library")
+            self._git(root, "commit", "--quiet", "-m", "advance materialized library")
+            self._git(library, "checkout", "--quiet", approved_head)
+            self._git(
+                root,
+                "update-index",
+                "--cacheinfo",
+                "160000",
+                approved_head,
+                "vendor/library",
+            )
+            project.transition("review")
+
+            with self.assertRaisesRegex(AnchorError, "parent HEAD"):
+                project.precommit()
 
     def test_quality_invalidates_masked_git_state_after_precommit(self) -> None:
         cases = ("staged-root", "committed-nested")
@@ -717,11 +1285,8 @@ class ActualDiffRiskTests(unittest.TestCase):
             self._plan(project, mode="STANDARD")
 
             real_open = os.open
-            risky_key = os.path.normcase(os.path.abspath(risky))
-
             def guarded_open(path: object, *args: object, **kwargs: object) -> int:
-                candidate = os.path.normcase(os.path.abspath(os.fspath(path)))
-                if candidate == risky_key:
+                if self._same_path(path, risky):
                     raise PermissionError("simulated baseline read denial")
                 return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -752,11 +1317,8 @@ class ActualDiffRiskTests(unittest.TestCase):
             self._plan(project, mode="STANDARD")
 
             real_lstat = os.lstat
-            risky_key = os.path.normcase(os.path.abspath(risky))
-
             def guarded_lstat(path: object, *args: object, **kwargs: object) -> object:
-                candidate = os.path.normcase(os.path.abspath(os.fspath(path)))
-                if candidate == risky_key:
+                if self._same_path(path, risky):
                     raise PermissionError("simulated baseline lstat denial")
                 return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -790,11 +1352,8 @@ class ActualDiffRiskTests(unittest.TestCase):
             self._plan(project, mode="STANDARD")
 
             real_scandir = os.scandir
-            risky_key = os.path.normcase(os.path.abspath(risky_directory))
-
             def guarded_scandir(path: object) -> object:
-                candidate = os.path.normcase(os.path.abspath(os.fspath(path)))
-                if candidate == risky_key:
+                if self._same_path(path, risky_directory):
                     raise PermissionError("simulated baseline directory denial")
                 return real_scandir(path)
 
