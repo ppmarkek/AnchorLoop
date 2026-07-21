@@ -1054,7 +1054,7 @@ class SkillInstaller:
             return
         if not npx_package or not _NPX_PACKAGE_PATTERN.fullmatch(npx_package):
             raise AnchorError(
-                "The npx skill runtime requires a pinned npm package such as anchorloop@0.1.0."
+                f"The npx skill runtime requires a pinned npm package such as anchorloop@{VERSION}."
             )
 
     @staticmethod

@@ -230,13 +230,16 @@ test("release documentation is finalized deterministically without touching runt
     const secondDocuments = readDocuments(second);
     assert.deepEqual(firstDocuments, secondDocuments);
     for (const [relativePath, content] of firstDocuments) {
-      assert.doesNotMatch(content, /unreleased|release[- ]candidate|published production/i, relativePath);
+      assert.doesNotMatch(
+        content,
+        /unreleased|release[- ]candidate|current release branch|available from npm `latest`/i,
+        relativePath,
+      );
     }
-    assert.match(firstDocuments.get("README.md"), /\*\*Release artifact:\*\* `anchorloop@0\.2\.0`/);
-    assert.match(firstDocuments.get("README.md"), /\*\*Artifact date:\*\* `2026-07-15`/);
+    assert.match(firstDocuments.get("README.md"), /\*\*Published production:\*\* `anchorloop@0\.2\.0`/);
     assert.doesNotMatch(firstDocuments.get("README.md"), /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\//);
-    assert.match(firstDocuments.get("README.md"), /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/v0\.2\.0\//);
-    assert.match(firstDocuments.get("CONTRIBUTING.md"), /exact release artifact/);
+    assert.match(firstDocuments.get("README.md"), /src="docs\/assets\/anchorloop-delivery-loop\.svg"/);
+    assert.match(firstDocuments.get("CONTRIBUTING.md"), /current published production release/);
     assert.equal(
       fs.readFileSync(path.join(first, "src", "anchorloop", "version.py"), "utf8"),
       runtimeBefore,
@@ -280,7 +283,7 @@ test(
         },
       );
       assert.equal(finalizer.status, 0, `${finalizer.stdout}\n${finalizer.stderr}`);
-      assert.match(finalizer.stdout, /Prepared 15 release artifact documents/);
+      assert.match(finalizer.stdout, /Validated 15 release documents/);
       assert.doesNotThrow(() =>
         assertReleaseArtifactDocs(fixture, SUPPORTED_VERSION, RELEASE_DATE),
       );
@@ -295,9 +298,7 @@ test(
         .filter(([relativePath, content]) => !content.equals(before.get(relativePath)))
         .map(([relativePath]) => relativePath)
         .sort();
-      const expectedChanges = releaseDocumentSpecs(SUPPORTED_VERSION, RELEASE_DATE)
-        .map((spec) => spec.path)
-        .sort();
+      const expectedChanges = [];
       assert.deepEqual(
         changedPaths,
         expectedChanges,
@@ -354,24 +355,23 @@ test(
         assert.equal(packagedDocument, fixtureDocument, `${spec.path} changed during npm pack`);
         assert.doesNotMatch(
           packagedDocument,
-          /unreleased|release[- ]candidate|published production/i,
+          /unreleased|release[- ]candidate|current release branch|available from npm `latest`/i,
           `${spec.path} retained source-only release status`,
         );
       }
 
       const packagedReadme = fs.readFileSync(path.join(packagedRoot, "README.md"), "utf8");
-      assert.match(packagedReadme, /\*\*Release artifact:\*\* `anchorloop@0\.2\.0`/);
-      assert.match(packagedReadme, /\*\*Artifact date:\*\* `2026-07-15`/);
+      assert.match(packagedReadme, /\*\*Published production:\*\* `anchorloop@0\.2\.0`/);
       assert.doesNotMatch(packagedReadme, /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\//);
-      assert.match(packagedReadme, /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/v0\.2\.0\/docs\/assets\/anchorloop-delivery-loop\.svg/);
-      assert.match(packagedReadme, /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/v0\.2\.0\/docs\/assets\/anchorloop-evidence-integrity\.svg/);
+      assert.match(packagedReadme, /src="docs\/assets\/anchorloop-delivery-loop\.svg"/);
+      assert.match(packagedReadme, /src="docs\/assets\/anchorloop-evidence-integrity\.svg"/);
 
       const packagedContributing = fs.readFileSync(
         path.join(packagedRoot, "CONTRIBUTING.md"),
         "utf8",
       );
-      assert.match(packagedContributing, /stages the finalized Git\s+checkout directory/);
-      assert.match(packagedContributing, /post-promotion documentation PR against `main`/);
+      assert.match(packagedContributing, /stage-only OIDC/);
+      assert.match(packagedContributing, /exact staged tarball/);
       assert.doesNotMatch(packagedContributing, /publishes it with npm provenance through OIDC/i);
       assert.doesNotMatch(packagedContributing, /exact-source/i);
     } finally {
@@ -387,20 +387,20 @@ test("release documentation finalization fails closed and does not partially wri
     fs.writeFileSync(
       readmePath,
       fs.readFileSync(readmePath, "utf8").replace(
-        "**Published production:** `anchorloop@0.1.0`",
-        "**Production marker changed unexpectedly:** `anchorloop@0.1.0`",
+        "**Published production:** `anchorloop@0.2.0`",
+        "**Production marker changed unexpectedly:** `anchorloop@0.2.0`",
       ),
       "utf8",
     );
     const before = readDocuments(root);
     assert.throws(
       () => finalizeReleaseDocs(root, SUPPORTED_VERSION, RELEASE_DATE),
-      /README\.md: expected the release-candidate source fragment exactly once, found 0/,
+      /README\.md: release document marker is missing: \*\*Published production:\*\* `anchorloop@0\.2\.0`/,
     );
     assert.deepEqual(readDocuments(root), before);
     assert.throws(
       () => assertReleaseArtifactDocs(root, SUPPORTED_VERSION, RELEASE_DATE),
-      /README\.md: release artifact marker is missing/,
+      /README\.md: release document marker is missing/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -412,7 +412,7 @@ test("a new release version requires an explicit documentation transformation up
   try {
     assert.throws(
       () => finalizeReleaseDocs(root, "0.3.0", RELEASE_DATE),
-      /update its exact transformations before releasing 0\.3\.0/,
+      /validator supports 0\.2\.0; update its supported version before releasing 0\.3\.0/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

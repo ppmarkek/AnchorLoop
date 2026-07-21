@@ -2,13 +2,12 @@
 
 ## Release status
 
-- Published production: `anchorloop@0.1.0`
-- Current release branch: unreleased `0.2.0` release candidate
+- Previous production: `anchorloop@0.1.0`
+- Current production: `anchorloop@0.2.0`
 
-Do not run the `0.2.0` registry commands in this guide until that exact version
-exists publicly and its registry smoke has passed. Use exact versions
-throughout the migration, do not replace `.anchor/`, and do not skip the
-`0.1.0` recovery preflight.
+The exact `0.2.0` package is available in the public registry. Use exact
+versions throughout the migration, do not replace `.anchor/`, and do not skip
+the `0.1.0` recovery preflight.
 
 ## Compatibility contract
 
@@ -48,7 +47,7 @@ Only continue after the final `0.1.0 doctor --strict` succeeds. Preserve its
 output if recovery cannot complete; do not ask `0.2.0` to replay a partially
 applied legacy journal.
 
-## After publication: upgrade with the exact npm version
+## Upgrade with the exact npm version
 
 From each existing AnchorLoop project:
 
@@ -59,9 +58,7 @@ npx --yes anchorloop@0.2.0 doctor --strict
 ~~~
 
 Keep commands pinned to `@0.2.0` in automation and installed skill metadata.
-The pin makes upgrades deliberate and avoids relying on npm `latest` during
-the rollout. Before publication, test the candidate only from a development
-checkout.
+The pin makes upgrades deliberate and avoids relying on mutable npm dist-tags.
 
 ## Locally modified skill files
 

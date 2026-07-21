@@ -1,6 +1,6 @@
 # AnchorLoop 0.2 release plan
 
-Status: `0.2.0` release candidate; `0.1.0` is published production
+Status: `0.2.0` is the current production release; `0.1.0` is the previous line
 Scope: local, agent-neutral workflow integrity and human-ownership loop
 
 ## Product intent
@@ -13,7 +13,7 @@ thin discovery/instruction adapter around that same core.
 > The agent may write the code. The engineer owns why it exists, which
 > trade-off was chosen, what could fail, and how the result is verified.
 
-## What the 0.2 candidate implements
+## What the 0.2 release implements
 
 | Area | Release behavior |
 |---|---|
@@ -100,11 +100,11 @@ anchor rules list|propose|approve|supersede
 anchor agent detect|setup|status
 ~~~
 
-After publication and registry smoke, the npm form will run the same surface
-through the pinned `npx --yes anchorloop@0.2.0` command. During release-candidate
-development use the editable Python checkout and `anchor`; `anchorloop@0.1.0`
-remains the production npm package. README and the bundled skill contain the
-full structured plan/verification examples.
+The npm form runs the same surface through the pinned
+`npx --yes anchorloop@0.2.0` command. Development checkouts may use the
+editable Python installation and `anchor`; the published package remains the
+recommended automation runner. README and the bundled skill contain the full
+structured plan/verification examples.
 
 ## Production release gates
 
@@ -126,15 +126,13 @@ Code is release-ready only when all of these are true:
   uninstall, residue, `next` tag, and `gitHead` checks before a maintainer
   promotes it to `latest` interactively with 2FA.
 
-The `0.2.0` release must come from a GitHub-verified signed annotated `v0.2.0`
-tag contained in `origin/main` after the full CI matrix passes. The protected
-`npm-release` environment must use a stage-only Trusted Publisher for
+The `0.2.0` release was produced by a GitHub-verified signed annotated tag
+contained in `origin/main` after the full CI matrix passed. The protected
+`npm-release` environment uses a stage-only Trusted Publisher for
 `.github/workflows/release.yml`; it allows `npm stage publish` through OIDC but
-not direct `npm publish`. The automated workflow refuses an already-published
-exact version and stores no npm token. Human-owned steps remain explicit:
-inspect the staged artifact, approve it with 2FA, dispatch the read-only public
-registry and `gitHead` verification, then promote the verified exact version to
-`latest` interactively with 2FA.
+not direct `npm publish`. Future releases follow the same gates, and the
+automated workflow refuses an already-published exact version and stores no npm
+token.
 
 ## Pilot evidence
 

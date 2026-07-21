@@ -19,20 +19,14 @@ post-release product questions.
 
 ## Human-owned release gate
 
-### Publish the immutable 0.2.0 version
+### Maintain the published 0.2.0 version
 
-`anchorloop@0.1.0` remains published production. The current release branch is
-the unreleased `0.2.0` release candidate. The release flow requires the signed
-annotated tag commit to be contained in `origin/main` and to pass exact-tag CI
-before the exact tarball is staged under `next` through a Trusted Publisher
-configured for stage-only `npm stage publish`. A maintainer must download and
-inspect the staged artifact, approve it with 2FA, then dispatch the read-only
-exact-version registry lifecycle, verify that `next` points to that version,
-and check npm `gitHead`. Only after those checks pass may a maintainer
-interactively run `npm dist-tag add anchorloop@0.2.0 latest` with 2FA. The
-workflow stores no npm token and never promotes `latest` automatically. Until
-that sequence completes, no document may claim that `0.2.0` is published or
-available from npm `latest`.
+`anchorloop@0.2.0` is published production. Its signed annotated tag is
+contained in `origin/main`, and the release passed exact-tag CI, staged npm
+publishing, exact-version registry smoke, and human approval. The workflow
+stores no npm token and does not move mutable dist-tags automatically. Keep
+automation pinned to `anchorloop@0.2.0` and leave the signed release artifact
+unchanged.
 
 ## Decisions before public beta
 

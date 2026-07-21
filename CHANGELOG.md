@@ -1,14 +1,10 @@
 # Changelog
 
-All notable AnchorLoop changes are documented here. npm releases are immutable;
-an entry marked **Unreleased** describes repository state, not production npm
-availability.
+All notable AnchorLoop changes are documented here. npm releases are immutable.
 
-## 0.2.0 - Unreleased
+## 0.2.0 - Published
 
-Published production remains `anchorloop@0.1.0` until the signed `v0.2.0` tag
-is contained in `main` and passes staging, maintainer approval, exact-version
-registry smoke, and interactive `latest` promotion.
+`anchorloop@0.2.0` is the current production release.
 
 ### Added
 

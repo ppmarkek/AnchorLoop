@@ -1,9 +1,9 @@
 # AnchorLoop
 
-> - **Опубликованный production:** `anchorloop@0.1.0`
-> - **Неопубликованный release candidate:** `0.2.0`
-> - До публикации `0.2.0` используйте в production точную команду
->   `npx --yes anchorloop@0.1.0 ...`. [Инструкция по миграции](../MIGRATION_0.2.md).
+> - **Опубликованная production-версия:** `anchorloop@0.2.0`
+> - **Текущая версия:** `0.2.0`
+> - В автоматизации используйте точную версию:
+>   `npx --yes anchorloop@0.2.0 ...`. [Инструкция по миграции](../MIGRATION_0.2.md).
 
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
@@ -37,4 +37,4 @@ Graphify output, lock, transaction и outbox; эти локальные арте
 start → brief → plan → approve → implement → review → precommit → verify → close
 ~~~
 
-Команда `precommit` проверяет синтаксис Python и Git whitespace; поиск возможных секретов включается только для одобренного инженером правила security. Она не делает commit. Основной английский README содержит актуальную полную документацию, режимы FAST/STANDARD/CAREFUL, безопасную установку skill, транзакционное восстановление и ограничения release candidate.
+Команда `precommit` проверяет синтаксис Python и Git whitespace; поиск возможных секретов включается только для одобренного инженером правила security. Она не делает commit. Основной английский README содержит актуальную полную документацию, режимы FAST/STANDARD/CAREFUL, безопасную установку skill и транзакционное восстановление.

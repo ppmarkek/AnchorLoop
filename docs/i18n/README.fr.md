@@ -2,10 +2,10 @@
 
 [English](../../README.md) · [Русский](README.ru.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
-> - **Production publiée :** `anchorloop@0.1.0`
-> - **Release candidate non publié :** `0.2.0`
-> - Jusqu'à la publication de `0.2.0`, utilisez
->   `npx --yes anchorloop@0.1.0 ...` en production. [Guide de migration](../MIGRATION_0.2.md).
+> - **Production publiée :** `anchorloop@0.2.0`
+> - **Version actuelle :** `0.2.0`
+> - Dans l'automatisation, utilisez la version exacte :
+>   `npx --yes anchorloop@0.2.0 ...`. [Guide de migration](../MIGRATION_0.2.md).
 
 AnchorLoop est un workflow local pour les agents de programmation assistés par IA. L’ingénieur garde le contrôle des tâches, des règles, de la structure et de la validation finale.
 

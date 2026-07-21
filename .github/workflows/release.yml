@@ -136,7 +136,7 @@ jobs:
           set -euo pipefail
           if ! published_name="$(npm view "${PACKAGE_NAME}" name --json 2>/dev/null)"; then
             echo "Could not verify the existing npm package ${PACKAGE_NAME}." >&2
-            echo "Restore registry access and confirm the published 0.1.0 baseline before releasing." >&2
+            echo "Restore registry access and confirm the published AnchorLoop package baseline before releasing." >&2
             exit 1
           fi
           test "$(jq -r '.' <<< "$published_name")" = "$PACKAGE_NAME" || {
@@ -386,11 +386,8 @@ jobs:
             echo "npm view ${PACKAGE_NAME}@latest version"
             echo '```'
             echo
-            echo "After npm confirms ${PACKAGE_NAME}@latest is ${VERSION}, open a"
-            echo "post-promotion documentation PR against main. Update every source"
-            echo "status surface and its release-document tests from 0.1.0 production /"
-            echo "${VERSION} candidate to ${VERSION} production. Update or retire the"
-            echo "${VERSION}-specific finalizer source fragments and source-RC assertions"
-            echo "before preparing the next release cycle, and leave the signed"
-            echo "v${VERSION} artifact unchanged."
+            echo "After npm confirms ${PACKAGE_NAME}@latest is ${VERSION}, keep the"
+            echo "signed v${VERSION} artifact unchanged. Follow-up documentation"
+            echo "changes must be made in a new commit and must not republish the"
+            echo "immutable version."
           } >> "$GITHUB_STEP_SUMMARY"

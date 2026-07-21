@@ -6,23 +6,19 @@ engine and it never becomes the source of truth for task state.
 
 ## Install
 
-Published production is `anchorloop@0.1.0`. The current release branch is the
-unreleased `0.2.0` release candidate; its guided multi-agent installer is not
-available from npm `latest` until the signed tag, staging, approval, registry
-smoke, and interactive promotion sequence succeeds.
+Published production is `anchorloop@0.2.0`. Its guided multi-agent installer
+is available from the public npm registry.
 
 For production use, pin the published package explicitly:
 
 ~~~powershell
-npx --yes anchorloop@0.1.0 install --project --platform codex --apply
+npx --yes anchorloop@0.2.0 install --project --platform codex --apply
 ~~~
 
-To exercise the `0.2.0` candidate from a checkout, install the current source
-and open the guided installer locally:
+To open the guided installer from the published package:
 
 ~~~powershell
-python -m pip install -e .
-anchor install --interactive
+npx --yes anchorloop@0.2.0 install --interactive
 ~~~
 
 In an interactive terminal choose the current project or your user profile;
@@ -37,7 +33,7 @@ writes files.
 |---|---|---|
 | Filesystem destination/install matrix for `agents`, `codex`, `cursor`, `gemini`, `claude`, and `opencode` | **Verified** | Automated tests verify exact placement, owned assets, update, and uninstall behavior. This does not verify any host. |
 | Real-host skill discovery for every named host | **Experimental** | Each host must be opened and tested against its current release before discovery can be claimed. No host is marked Verified from filesystem placement alone. |
-| Native adapters, hooks, MCP, and other undiscovered host integrations | **Planned** | These remain separate opt-in integrations and are not part of the `0.2.0` release-candidate scope. |
+| Native adapters, hooks, MCP, and other undiscovered host integrations | **Planned** | These remain separate opt-in integrations and are not part of the `0.2.0` release scope. |
 
 Project setup uses `.agents/skills/anchorloop/`. Global setup writes the
 selected host's native directory, such as `~/.codex/skills/anchorloop/` or
@@ -57,9 +53,8 @@ anchor install --global --all --apply
 anchor install --global --all
 ~~~
 
-After `0.2.0` is published and its registry smoke passes, automation may use
-the exact-version runner `npx --yes anchorloop@0.2.0 ...`. Keep release and
-automation commands pinned even after npm `latest` moves.
+Automation may use the exact-version runner `npx --yes anchorloop@0.2.0 ...`.
+Keep release and automation commands pinned even if npm dist-tags change.
 
 For a project-scoped installation, AnchorLoop rejects symlink and Windows
 reparse-point components in `.codex/`, `.agents/`, `skills/`, and the skill

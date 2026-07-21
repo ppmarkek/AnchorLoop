@@ -1,9 +1,8 @@
 # Contributing to AnchorLoop
 
-`anchorloop@0.1.0` is the published public-alpha baseline; current `main` is
-the unreleased `0.2.0` release candidate. Small, testable changes that
-strengthen its local, agent-neutral workflow core are preferred over broad
-integrations.
+`anchorloop@0.2.0` is the current published production release. Small,
+testable changes that strengthen its local, agent-neutral workflow core are
+preferred over broad integrations.
 
 ## Local development
 
@@ -35,10 +34,9 @@ in the normal suite; do not replace them with Linux-only mocks.
 ## npm launcher
 
 The optional exact-version npm route (for example,
-`npx --yes anchorloop@0.2.0 install` after publication) requires Node.js 18 or
-newer and must remain a thin launcher around the Python core. During candidate
-development exercise the checkout directly. When changing its package,
-launcher, or skill templates:
+`npx --yes anchorloop@0.2.0 install`) requires Node.js 18 or newer and must
+remain a thin launcher around the Python core. During development, exercise
+the checkout directly. When changing its package, launcher, or skill templates:
 
 ~~~powershell
 npm test
@@ -66,18 +64,17 @@ protected `npm-release` GitHub environment. Keep the CI jobs as required checks
 on `main`. Do not add a long-lived npm token to the workflow.
 
 Create a signed annotated tag whose name exactly matches the canonical version
-(for example, `git tag -s v0.2.0 -m "AnchorLoop 0.2.0"`) and ensure the
+(for example, `git tag -s v0.2.1 -m "AnchorLoop 0.2.1"`) and ensure the
 signing key is associated with the maintainer's GitHub account before pushing
-the tag. The tagged source remains truthful about its pre-release state. After
-the full Python, wheel, npm, OS, and Node 18/20/22 matrix passes, a disposable
-publish job deterministically transforms only declared packaged documentation
-using the tagged commit date. It rejects staged changes, non-ignored untracked
-paths, and tracked mutations outside the documentation allowlist before a
-dry-run of package assembly. Both the dry-run and staging disable lifecycle
-scripts so the checked payload cannot mutate afterward. The job then passes the
-finalized Git checkout directory to `npm stage publish` under `next` with
-provenance through stage-only OIDC, preserving npm's internal directory-derived
-`gitHead`; it never calls `npm publish` or promotes `latest`.
+the tag. After the full Python, wheel, npm, OS, and Node 18/20/22 matrix passes,
+a disposable publish job validates the packaged documentation using the tagged
+commit date. It rejects staged changes, non-ignored untracked paths, and
+tracked mutations outside the documentation allowlist before a dry-run of
+package assembly. Both the dry-run and staging disable lifecycle scripts so
+the checked payload cannot mutate afterward. The job then passes the finalized
+Git checkout directory to `npm stage publish` under `next` with provenance
+through stage-only OIDC, preserving npm's internal directory-derived `gitHead`;
+it never calls `npm publish` or promotes `latest`.
 
 This produces deterministic packaged documentation and one reviewed tarball
 from the signed source and commit date, but it is not a bit-for-bit binary
@@ -85,27 +82,17 @@ reproducibility claim. Hosted runner images and Python build tooling still
 receive upstream updates; do not claim binary reproducibility without a
 separately pinned toolchain and runner-image policy.
 
-`anchorloop@0.1.0` remains the published production baseline while `0.2.0` is
-an unreleased candidate. npm versions are immutable: before creating `v0.2.0`,
-verify that `anchorloop@0.2.0` does not exist. The signed-tag workflow runs
-exact-tag CI against the truthful repository docs, then changes only packaged
-documentation in its disposable job using the tagged commit date. It dry-runs
-package assembly with lifecycle scripts disabled, then stages the finalized Git
-checkout directory under `next` with lifecycle scripts disabled through
-stage-only OIDC so npm records `gitHead`. A maintainer downloads and inspects
-the exact staged tarball, approves it with 2FA, dispatches the
-tag-bound exact registry smoke, verifies npm `gitHead`, and only then promotes
-the version to `latest` manually with 2FA. After
-`npm view anchorloop@latest version` returns
-`0.2.0`, open a post-promotion documentation PR against `main`. That PR must
-move every source status surface and its release-document tests from `0.1.0`
-production / `0.2.0` candidate to `0.2.0` production. It must also update or
-retire the `0.2.0`-specific finalizer source fragments and source-RC assertions
-before preparing the next release cycle. Leave the signed `v0.2.0` artifact
-unchanged. Never publish `0.2.0` directly, move a signed tag, or overwrite a
-failed release. Fix pre-stage failures in a new commit; after approval,
-deprecate a defective version and release `0.2.1`. Do not weaken `release.yml`
-or add a long-lived token.
+`anchorloop@0.2.0` is the published production baseline. npm versions are
+immutable: verify that the exact next version does not exist before creating a
+release tag. The signed-tag workflow runs exact-tag CI, validates the
+documentation and package boundary, stages the tarball under `next` with
+stage-only OIDC, and records npm `gitHead`. A maintainer downloads and inspects
+the exact staged tarball, approves it with 2FA, dispatches the tag-bound exact
+registry smoke, verifies npm `gitHead`, and only then promotes the version to
+`latest` manually with 2FA. Never publish an existing version directly, move a
+signed tag, or overwrite a failed release. Fix pre-stage failures in a new
+commit; after approval, deprecate a defective version and release a new patch.
+Do not weaken `release.yml` or add a long-lived token.
 
 ## Pull requests
 

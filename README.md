@@ -8,16 +8,11 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 ## Status
 
-**Published production:** `anchorloop@0.1.0`
+**Published production:** `anchorloop@0.2.0`
 
-**Unreleased candidate:** `0.2.0` release candidate
-
-The published `0.1.0` package remains the production version. The current
-release branch contains the unreleased recovery, validation, ownership,
-release-safety, and multi-agent installer work planned for `0.2.0`. Until the
-signed `v0.2.0` tag passes staging, maintainer approval, exact-version registry
-smoke, and interactive `latest` promotion, do not describe those additions as
-available from npm `latest`.
+The `0.2.0` release contains the recovery, validation, ownership,
+release-safety, and multi-agent installer work described below. Use the exact
+version in automation and installed skill metadata.
 
 ## Core idea
 
@@ -78,7 +73,7 @@ The source of truth is the local `anchor` CLI and the project’s `.anchor/` dir
 
 Every host gets the same task states and approval rules. Native integrations must remain thin adapters; they never own the workflow state.
 
-## What is implemented in the unreleased 0.2.0 candidate
+## What is implemented in the 0.2.0 release
 
 - `anchor install` and `anchor uninstall` preview then manage a packaged,
   project- or user-scoped skill adapter for Agent Skills, Codex, Cursor,
@@ -111,27 +106,20 @@ Every host gets the same task states and approval rules. Native integrations mus
 
 Graphify installation, full language-specific security tooling, project-specific test commands, external research, skill discovery, and native host adapters are planned next. AnchorLoop never installs them silently.
 
-## Install the published 0.1.0 package
+## Install the published 0.2.0 package
 
 Requirements: Node.js 18 or newer and Python 3.11 or newer.
 
 Use the exact published production version:
 
 ~~~sh
-npx --yes anchorloop@0.1.0 install --project --platform codex --apply
+npx --yes anchorloop@0.2.0 install --project --platform codex --apply
 ~~~
 
-Do not use an unversioned `npx anchorloop install` command to test the features
-documented below: npm `latest` continues to resolve to `0.1.0` until the
-`0.2.0` release flow completes.
-
-## Unreleased 0.2.0 guided setup
-
-From a development checkout, install the current Python CLI in editable mode:
+The guided setup is also available from the published package:
 
 ~~~sh
-python -m pip install -e .
-anchor install --interactive
+npx --yes anchorloop@0.2.0 install --interactive
 ~~~
 
 The compact setup wizard asks where AnchorLoop should live:
@@ -153,8 +141,8 @@ discovery remains **Experimental** until each real host is opened and confirms
 that it discovers and follows the installed skill; file placement alone is not
 a production host-discovery claim.
 
-For local dogfooding, scripts, and CI, use explicit flags instead of the
-wizard. Do not commit the generated installation:
+For scripts and CI, use explicit flags instead of the wizard. Do not commit
+the generated installation:
 
 ~~~sh
 anchor install --project --platform codex --apply
@@ -194,8 +182,7 @@ preserving task, rule, approval, and audit records. If an installed skill was
 edited locally, review and preserve that diff before using `--force`.
 
 See the [0.1.0 to 0.2.0 migration guide](docs/MIGRATION_0.2.md) for the required
-`0.1.0` recovery preflight, release-candidate procedure, and exact commands to
-use after publication.
+`0.1.0` recovery preflight and exact-version upgrade procedure.
 
 ## Development from a checkout
 

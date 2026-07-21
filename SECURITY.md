@@ -4,13 +4,12 @@
 
 | Version | Supported |
 |---|---|
-| `0.2.x` | Unreleased release candidate |
+| `0.2.x` | Current production release |
 | `0.1.x` | Security fixes only |
 
-Published production remains `anchorloop@0.1.0`. Version `0.2.0` is an
-unreleased release candidate until the complete signed-tag and staged registry
-workflow succeeds. New security work is developed on the current `0.2.x`
-candidate; the published `0.1.x` line receives security fixes only.
+Published production is `anchorloop@0.2.0`. New security work is developed on
+the current `0.2.x` line; the previous `0.1.x` line receives security fixes
+only.
 
 ## Reporting a vulnerability
 
