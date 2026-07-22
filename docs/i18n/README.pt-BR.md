@@ -1,6 +1,6 @@
 # AnchorLoop
 
-> **Produção publicada:** `anchorloop@0.2.0`
+> **Produção publicada:** `anchorloop@0.2.1`
 
 **Workflow controlado por engenharia e neutro para agentes de desenvolvimento
 de software assistido por IA.**
@@ -13,9 +13,9 @@ e aceitação final.
 
 ## Status
 
-**Produção publicada:** `anchorloop@0.2.0`
+**Produção publicada:** `anchorloop@0.2.1`
 
-A versão `0.2.0` inclui recovery, validação, modos de ownership, releases
+A versão `0.2.1` inclui recovery, validação, modos de ownership, releases
 seguros e instalação de skills para vários agentes. Use sempre a versão exata
 na automação e nos skills instalados.
 
@@ -70,7 +70,7 @@ IDE ou formato de slash-command específico.
 
 Todos os hosts usam os mesmos estados de tarefa e regras de approval.
 
-## Funcionalidades do 0.2.0
+## Funcionalidades do 0.2.1
 
 - Skills para Agent Skills, Codex, Cursor, Gemini CLI, Claude Code e OpenCode.
 - Proteção contra symlinks e Windows reparse points, paths seguros e writes
@@ -93,8 +93,8 @@ não são instalados automaticamente.
 Requisitos: Node.js 18+ e Python 3.11+.
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 install --interactive
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 install --interactive
 ~~~
 
 O wizard oferece o projeto atual ou o perfil do usuário e permite escolher
@@ -121,7 +121,7 @@ python -m pip install "git+https://github.com/ppmarkek/AnchorLoop.git"
 É uma instalação Git, não um release PyPI. Depois execute `anchor install` para
 adicionar o skill portable.
 
-## Migrar de 0.1.0 para 0.2.0
+## Migrar de 0.1.0 para 0.2.1
 
 Não apague `.anchor/`: ele é o registro do workflow do projeto. A migração
 atualiza arquivos de protocolo/suporte e assets do skill, preservando tasks,
@@ -138,9 +138,9 @@ npx --yes anchorloop@0.1.0 doctor --strict
 Depois atualize usando a versão exata:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 add --apply
-npx --yes anchorloop@0.2.0 doctor --strict
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 add --apply
+npx --yes anchorloop@0.2.1 doctor --strict
 ~~~
 
 Veja o [guia de migração](../MIGRATION_0.2.md).
@@ -260,7 +260,7 @@ de cache e recovery aos Gitignore, preservando linhas personalizadas.
 - [Mapa de decisões](../ANCHOR_DECISION_MAP.md)
 - [Domain glossary](../../CONTEXT.md)
 - [Portable skill](../PORTABLE_SKILL.md)
-- [Migração 0.1.0 → 0.2.0](../MIGRATION_0.2.md)
+- [Migração 0.1.0 → 0.2.1](../MIGRATION_0.2.md)
 - [Changelog](../../CHANGELOG.md)
 - [Contributing](../../CONTRIBUTING.md)
 - [Security](../../SECURITY.md)

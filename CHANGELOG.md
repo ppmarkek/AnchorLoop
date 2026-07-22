@@ -2,9 +2,22 @@
 
 All notable AnchorLoop changes are documented here. npm releases are immutable.
 
+## 0.2.1 - Published
+
+`anchorloop@0.2.1` is the current production release.
+
+### Fixed
+
+- release-document finalization preserves the checkout's line-ending style on
+  Windows, so the full cross-platform CI matrix can validate a clean artifact;
+- localized production documentation now provides the complete installation,
+  migration, workflow, rules, evidence, and testing instructions in every
+  supported language.
+
 ## 0.2.0 - Published
 
-`anchorloop@0.2.0` is the current production release.
+The `0.2.0` implementation line introduced the recovery, validation, ownership,
+release-safety, and multi-agent installer work carried forward by `0.2.1`.
 
 ### Added
 

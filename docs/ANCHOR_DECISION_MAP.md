@@ -19,13 +19,13 @@ post-release product questions.
 
 ## Human-owned release gate
 
-### Maintain the published 0.2.0 version
+### Maintain the published 0.2.1 version
 
-`anchorloop@0.2.0` is published production. Its signed annotated tag is
+`anchorloop@0.2.1` is published production. Its signed annotated tag is
 contained in `origin/main`, and the release passed exact-tag CI, staged npm
 publishing, exact-version registry smoke, and human approval. The workflow
 stores no npm token and does not move mutable dist-tags automatically. Keep
-automation pinned to `anchorloop@0.2.0` and leave the signed release artifact
+automation pinned to `anchorloop@0.2.1` and leave the signed release artifact
 unchanged.
 
 ## Decisions before public beta

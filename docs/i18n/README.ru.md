@@ -1,6 +1,6 @@
 # AnchorLoop
 
-> **Опубликованная production-версия:** `anchorloop@0.2.0`
+> **Опубликованная production-версия:** `anchorloop@0.2.1`
 
 **Workflow для AI-разработки, в котором инженер сохраняет контроль над
 решениями.**
@@ -12,9 +12,9 @@ AnchorLoop позволяет AI-агенту писать код, не заби
 
 ## Статус
 
-**Опубликованная production-версия:** `anchorloop@0.2.0`
+**Опубликованная production-версия:** `anchorloop@0.2.1`
 
-Релиз `0.2.0` включает восстановление после сбоев, валидацию, режимы
+Релиз `0.2.1` включает восстановление после сбоев, валидацию, режимы
 владения, безопасный release-процесс и установку skill для нескольких агентов.
 В автоматизации и установленных skill используйте точную версию.
 
@@ -77,7 +77,7 @@ access control. Агент с доступом к тому же терминал
 Все среды получают одинаковые состояния задач и правила approval. Native
 integrations остаются тонкими адаптерами и не владеют workflow-state.
 
-## Что входит в релиз 0.2.0
+## Что входит в релиз 0.2.1
 
 - `anchor install` и `anchor uninstall` управляют skill для Agent Skills,
   Codex, Cursor, Gemini CLI, Claude Code и OpenCode.
@@ -110,13 +110,13 @@ skill discovery и native host adapters не устанавливаются ав
 Точная production-команда:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
 ~~~
 
 Интерактивная установка:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --interactive
+npx --yes anchorloop@0.2.1 install --interactive
 ~~~
 
 Wizard предлагает текущий проект или профиль пользователя. В профиле можно
@@ -150,7 +150,7 @@ python -m pip install "git+https://github.com/ppmarkek/AnchorLoop.git"
 Это Git-установка, не релиз PyPI. После установки запускайте `anchor install`
 для добавления portable skill.
 
-## Миграция с 0.1.0 на 0.2.0
+## Миграция с 0.1.0 на 0.2.1
 
 Не удаляйте `.anchor/`: это workflow record проекта. Миграция обновляет
 управляемые protocol/support files и skill assets, сохраняя tasks, rules,
@@ -168,9 +168,9 @@ npx --yes anchorloop@0.1.0 doctor --strict
 Затем обновите проект точной версией:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 add --apply
-npx --yes anchorloop@0.2.0 doctor --strict
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 add --apply
+npx --yes anchorloop@0.2.1 doctor --strict
 ~~~
 
 Подробности: [руководство миграции](../MIGRATION_0.2.md).
@@ -328,7 +328,7 @@ recall и outcomes. Это локальные audit inputs, а не подтве
 - [Карта решений](../ANCHOR_DECISION_MAP.md)
 - [Domain glossary](../../CONTEXT.md)
 - [Portable skill](../PORTABLE_SKILL.md)
-- [Миграция 0.1.0 → 0.2.0](../MIGRATION_0.2.md)
+- [Миграция 0.1.0 → 0.2.1](../MIGRATION_0.2.md)
 - [Changelog](../../CHANGELOG.md)
 - [Contributing](../../CONTRIBUTING.md)
 - [Security policy](../../SECURITY.md)

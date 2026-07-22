@@ -1,6 +1,6 @@
 # AnchorLoop 0.2 release plan
 
-Status: `0.2.0` is the current production release; `0.1.0` is the previous line
+Status: `0.2.1` is the current production release; `0.1.0` is the previous line
 Scope: local, agent-neutral workflow integrity and human-ownership loop
 
 ## Product intent
@@ -101,7 +101,7 @@ anchor agent detect|setup|status
 ~~~
 
 The npm form runs the same surface through the pinned
-`npx --yes anchorloop@0.2.0` command. Development checkouts may use the
+`npx --yes anchorloop@0.2.1` command. Development checkouts may use the
 editable Python installation and `anchor`; the published package remains the
 recommended automation runner. README and the bundled skill contain the full
 structured plan/verification examples.
@@ -126,7 +126,7 @@ Code is release-ready only when all of these are true:
   uninstall, residue, `next` tag, and `gitHead` checks before a maintainer
   promotes it to `latest` interactively with 2FA.
 
-The `0.2.0` release was produced by a GitHub-verified signed annotated tag
+The `0.2.1` release was produced by a GitHub-verified signed annotated tag
 contained in `origin/main` after the full CI matrix passed. The protected
 `npm-release` environment uses a stage-only Trusted Publisher for
 `.github/workflows/release.yml`; it allows `npm stage publish` through OIDC but

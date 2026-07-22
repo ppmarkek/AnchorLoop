@@ -1,6 +1,6 @@
 # AnchorLoop
 
-> **Production publiée :** `anchorloop@0.2.0`
+> **Production publiée :** `anchorloop@0.2.1`
 
 **Workflow agent-neutre, contrôlé par l’ingénieur, pour le développement
 logiciel assisté par IA.**
@@ -13,9 +13,9 @@ l’acceptation finale.
 
 ## Statut
 
-**Production publiée :** `anchorloop@0.2.0`
+**Production publiée :** `anchorloop@0.2.1`
 
-La version `0.2.0` inclut la récupération après incident, la validation, les
+La version `0.2.1` inclut la récupération après incident, la validation, les
 modes d’ownership, les releases sécurisées et l’installation de skills pour
 plusieurs agents. Utilisez toujours la version exacte dans l’automatisation et
 les skills installés.
@@ -73,7 +73,7 @@ provider, IDE ou format de slash-command particulier.
 
 Tous les hosts utilisent les mêmes états de tâche et règles d’approval.
 
-## Fonctions incluses dans 0.2.0
+## Fonctions incluses dans 0.2.1
 
 - Skills pour Agent Skills, Codex, Cursor, Gemini CLI, Claude Code et OpenCode.
 - Protection des symlinks et Windows reparse points, chemins sûrs et écritures
@@ -96,8 +96,8 @@ adaptateurs natifs ne sont pas installés automatiquement.
 Prérequis : Node.js 18+ et Python 3.11+.
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 install --interactive
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 install --interactive
 ~~~
 
 Le wizard propose le projet ou le profil utilisateur et permet de choisir
@@ -124,7 +124,7 @@ python -m pip install "git+https://github.com/ppmarkek/AnchorLoop.git"
 Il s’agit d’une installation Git, pas d’une release PyPI. Exécutez ensuite
 `anchor install` pour ajouter le skill portable.
 
-## Migrer de 0.1.0 vers 0.2.0
+## Migrer de 0.1.0 vers 0.2.1
 
 Ne supprimez pas `.anchor/` : il contient le workflow du projet. La migration
 met à jour les fichiers de protocole/support et les assets du skill tout en
@@ -141,9 +141,9 @@ npx --yes anchorloop@0.1.0 doctor --strict
 Puis utilisez la version exacte :
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 add --apply
-npx --yes anchorloop@0.2.0 doctor --strict
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 add --apply
+npx --yes anchorloop@0.2.1 doctor --strict
 ~~~
 
 Voir le [guide de migration](../MIGRATION_0.2.md).
@@ -265,7 +265,7 @@ cache/recovery aux Gitignore sans supprimer les lignes personnalisées.
 - [Carte des décisions](../ANCHOR_DECISION_MAP.md)
 - [Domain glossary](../../CONTEXT.md)
 - [Portable skill](../PORTABLE_SKILL.md)
-- [Migration 0.1.0 → 0.2.0](../MIGRATION_0.2.md)
+- [Migration 0.1.0 → 0.2.1](../MIGRATION_0.2.md)
 - [Changelog](../../CHANGELOG.md)
 - [Contributing](../../CONTRIBUTING.md)
 - [Security](../../SECURITY.md)

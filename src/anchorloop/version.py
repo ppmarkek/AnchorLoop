@@ -5,4 +5,4 @@ release tags are checked against it before an npm package can be packed or
 published.
 """
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"

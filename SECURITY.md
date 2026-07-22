@@ -7,7 +7,7 @@
 | `0.2.x` | Current production release |
 | `0.1.x` | Security fixes only |
 
-Published production is `anchorloop@0.2.0`. New security work is developed on
+Published production is `anchorloop@0.2.1`. New security work is developed on
 the current `0.2.x` line; the previous `0.1.x` line receives security fixes
 only.
 

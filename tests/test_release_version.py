@@ -243,17 +243,17 @@ class ReleaseVersionTests(unittest.TestCase):
         normalized_decision_map = " ".join(decision_map.split())
         translations = sorted((root / "docs" / "i18n").glob("README.*.md"))
 
-        self.assertIn("**Published production:** `anchorloop@0.2.0`", readme)
-        self.assertNotIn("**Unreleased candidate:** `0.2.0` release candidate", readme)
+        self.assertIn("**Published production:** `anchorloop@0.2.1`", readme)
+        self.assertNotIn("**Unreleased candidate:** `0.2.1` release candidate", readme)
         self.assertIn('src="docs/assets/anchorloop-delivery-loop.svg"', readme)
         self.assertIn('src="docs/assets/anchorloop-evidence-integrity.svg"', readme)
         self.assertNotIn("raw.githubusercontent.com/ppmarkek/AnchorLoop/main/", readme)
         self.assertIn("deterministic materialized-file fallback", readme)
-        self.assertIn("## 0.2.0 - Published", changelog)
-        self.assertIn("Published production is `anchorloop@0.2.0`", security)
+        self.assertIn("## 0.2.1 - Published", changelog)
+        self.assertIn("Published production is `anchorloop@0.2.1`", security)
         self.assertIn("Current production release", security)
         self.assertNotIn("unreleased release", security.lower())
-        self.assertIn("anchorloop@0.2.0` is the published production baseline", contributing)
+        self.assertIn("anchorloop@0.2.1` is the published production baseline", contributing)
         self.assertIn("stage-only OIDC", contributing)
         self.assertIn("approves it with 2FA", contributing)
         self.assertIn("tag-bound exact registry smoke", " ".join(contributing.split()))
@@ -265,20 +265,20 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertIn("disable lifecycle scripts", contributing)
         self.assertNotIn("publishes it with npm provenance through OIDC", contributing)
         self.assertNotIn("exact-source", contributing)
-        self.assertIn("- Current production: `anchorloop@0.2.0`", migration)
+        self.assertIn("- Current production: `anchorloop@0.2.1`", migration)
         self.assertNotIn("Current release branch", migration)
         old_strict = "npx --yes anchorloop@0.1.0 doctor --strict"
         old_repair = "npx --yes anchorloop@0.1.0 doctor --repair"
-        new_install = "npx --yes anchorloop@0.2.0 install"
+        new_install = "npx --yes anchorloop@0.2.1 install"
         self.assertLess(migration.index(old_strict), migration.index(old_repair))
         self.assertLess(migration.index(old_repair), migration.index(new_install))
         self.assertIn("staged npm publishing", normalized_decision_map)
         self.assertIn("stores no npm token", normalized_decision_map)
-        self.assertIn("`anchorloop@0.2.0` is published production", decision_map)
+        self.assertIn("`anchorloop@0.2.1` is published production", decision_map)
         self.assertIn("deterministic materialized-file fallback", project_plan)
         for translation in translations:
             banner = "\n".join(translation.read_text(encoding="utf-8").splitlines()[:10])
-            self.assertIn("anchorloop@0.2.0", banner, translation.name)
+            self.assertIn("anchorloop@0.2.1", banner, translation.name)
             self.assertNotIn("anchorloop@0.1.0", banner, translation.name)
             self.assertNotRegex(banner, r"\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b", translation.name)
 

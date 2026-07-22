@@ -1,11 +1,11 @@
-# Migrating AnchorLoop from 0.1.0 to 0.2.0
+# Migrating AnchorLoop from 0.1.0 to 0.2.1
 
 ## Release status
 
 - Previous production: `anchorloop@0.1.0`
-- Current production: `anchorloop@0.2.0`
+- Current production: `anchorloop@0.2.1`
 
-The exact `0.2.0` package is available in the public registry. Use exact
+The exact `0.2.1` package is available in the public registry. Use exact
 versions throughout the migration, do not replace `.anchor/`, and do not skip
 the `0.1.0` recovery preflight.
 
@@ -15,7 +15,7 @@ Keep the project's `.anchor/` directory. It contains tasks, rules, approvals,
 events, outcomes, and recovery state; neither package upgrade nor skill
 installation should replace it.
 
-The `0.2.0` setup path:
+The `0.2.1` setup path:
 
 - appends missing managed ignore entries without removing custom lines;
 - refreshes missing protocol and support files;
@@ -44,7 +44,7 @@ npx --yes anchorloop@0.1.0 doctor --strict
 ~~~
 
 Only continue after the final `0.1.0 doctor --strict` succeeds. Preserve its
-output if recovery cannot complete; do not ask `0.2.0` to replay a partially
+output if recovery cannot complete; do not ask `0.2.1` to replay a partially
 applied legacy journal.
 
 ## Upgrade with the exact npm version
@@ -52,12 +52,12 @@ applied legacy journal.
 From each existing AnchorLoop project:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 add --apply
-npx --yes anchorloop@0.2.0 doctor --strict
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 add --apply
+npx --yes anchorloop@0.2.1 doctor --strict
 ~~~
 
-Keep commands pinned to `@0.2.0` in automation and installed skill metadata.
+Keep commands pinned to `@0.2.1` in automation and installed skill metadata.
 The pin makes upgrades deliberate and avoids relying on mutable npm dist-tags.
 
 ## Locally modified skill files
@@ -80,7 +80,7 @@ silently trusted. Propose and approve a replacement in the same category, then
 record the migration explicitly:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 rules supersede <old-rule-id> <new-rule-id> \
+npx --yes anchorloop@0.2.1 rules supersede <old-rule-id> <new-rule-id> \
   --by "Engineer name" \
   --reason "Migrate the legacy rule to an integrity-protected document."
 ~~~

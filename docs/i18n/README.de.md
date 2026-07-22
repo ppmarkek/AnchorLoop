@@ -1,6 +1,6 @@
 # AnchorLoop
 
-> **Veröffentlichte Production-Version:** `anchorloop@0.2.0`
+> **Veröffentlichte Production-Version:** `anchorloop@0.2.1`
 
 **Ein ingenieurgeführter, agent-neutraler Workflow für KI-gestützte
 Softwareentwicklung.**
@@ -13,9 +13,9 @@ entziehen.
 
 ## Status
 
-**Veröffentlichte Production-Version:** `anchorloop@0.2.0`
+**Veröffentlichte Production-Version:** `anchorloop@0.2.1`
 
-Version `0.2.0` enthält Recovery, Validierung, Ownership-Modi, sichere Releases
+Version `0.2.1` enthält Recovery, Validierung, Ownership-Modi, sichere Releases
 und Skill-Installation für mehrere Agents. Verwende in Automatisierung und
 installierten Skills immer die exakte Version.
 
@@ -70,7 +70,7 @@ bestimmtes Modell, ein Provider, eine IDE oder ein Slash-Command-Format.
 
 Alle Hosts verwenden dieselben Task-Zustände und Approval-Regeln.
 
-## Funktionen von 0.2.0
+## Funktionen von 0.2.1
 
 - Installation, Update und Entfernung eines Skills für Agent Skills, Codex,
   Cursor, Gemini CLI, Claude Code und OpenCode.
@@ -94,8 +94,8 @@ werden nicht automatisch installiert.
 Voraussetzungen: Node.js 18+ und Python 3.11+.
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 install --interactive
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 install --interactive
 ~~~
 
 Der Wizard bietet Projekt- oder Benutzerprofil-Installation für Codex, Cursor,
@@ -122,7 +122,7 @@ python -m pip install "git+https://github.com/ppmarkek/AnchorLoop.git"
 Dies ist ein Git-Weg, kein PyPI-Release. Danach fügt `anchor install` den
 optionalen Portable Skill hinzu.
 
-## Migration von 0.1.0 auf 0.2.0
+## Migration von 0.1.0 auf 0.2.1
 
 `.anchor/` darf nicht gelöscht werden. Die Migration aktualisiert verwaltete
 Protokoll-, Support- und Skill-Dateien und bewahrt Tasks, Rules, Approvals und
@@ -136,12 +136,12 @@ npx --yes anchorloop@0.1.0 doctor --repair
 npx --yes anchorloop@0.1.0 doctor --strict
 ~~~
 
-Dann exakt auf `0.2.0` umstellen:
+Dann exakt auf `0.2.1` umstellen:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
-npx --yes anchorloop@0.2.0 add --apply
-npx --yes anchorloop@0.2.0 doctor --strict
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 add --apply
+npx --yes anchorloop@0.2.1 doctor --strict
 ~~~
 
 Siehe [Migrationsanleitung](../MIGRATION_0.2.md).
@@ -259,7 +259,7 @@ Cache- und Recovery-Einträge in Gitignore-Dateien ergänzt werden.
 - [Entscheidungskarte](../ANCHOR_DECISION_MAP.md)
 - [Domain glossary](../../CONTEXT.md)
 - [Portable Skill](../PORTABLE_SKILL.md)
-- [Migration 0.1.0 → 0.2.0](../MIGRATION_0.2.md)
+- [Migration 0.1.0 → 0.2.1](../MIGRATION_0.2.md)
 - [Changelog](../../CHANGELOG.md)
 - [Contributing](../../CONTRIBUTING.md)
 - [Security](../../SECURITY.md)

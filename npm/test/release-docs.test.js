@@ -236,7 +236,7 @@ test("release documentation is finalized deterministically without touching runt
         relativePath,
       );
     }
-    assert.match(firstDocuments.get("README.md"), /\*\*Published production:\*\* `anchorloop@0\.2\.0`/);
+    assert.match(firstDocuments.get("README.md"), /\*\*Published production:\*\* `anchorloop@0\.2\.1`/);
     assert.doesNotMatch(firstDocuments.get("README.md"), /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\//);
     assert.match(firstDocuments.get("README.md"), /src="docs\/assets\/anchorloop-delivery-loop\.svg"/);
     assert.match(firstDocuments.get("CONTRIBUTING.md"), /current published production release/);
@@ -361,7 +361,7 @@ test(
       }
 
       const packagedReadme = fs.readFileSync(path.join(packagedRoot, "README.md"), "utf8");
-      assert.match(packagedReadme, /\*\*Published production:\*\* `anchorloop@0\.2\.0`/);
+      assert.match(packagedReadme, /\*\*Published production:\*\* `anchorloop@0\.2\.1`/);
       assert.doesNotMatch(packagedReadme, /raw\.githubusercontent\.com\/ppmarkek\/AnchorLoop\/main\//);
       assert.match(packagedReadme, /src="docs\/assets\/anchorloop-delivery-loop\.svg"/);
       assert.match(packagedReadme, /src="docs\/assets\/anchorloop-evidence-integrity\.svg"/);
@@ -387,15 +387,15 @@ test("release documentation finalization fails closed and does not partially wri
     fs.writeFileSync(
       readmePath,
       fs.readFileSync(readmePath, "utf8").replace(
-        "**Published production:** `anchorloop@0.2.0`",
-        "**Production marker changed unexpectedly:** `anchorloop@0.2.0`",
+        "**Published production:** `anchorloop@0.2.1`",
+        "**Production marker changed unexpectedly:** `anchorloop@0.2.1`",
       ),
       "utf8",
     );
     const before = readDocuments(root);
     assert.throws(
       () => finalizeReleaseDocs(root, SUPPORTED_VERSION, RELEASE_DATE),
-      /README\.md: release document marker is missing: \*\*Published production:\*\* `anchorloop@0\.2\.0`/,
+      /README\.md: release document marker is missing: \*\*Published production:\*\* `anchorloop@0\.2\.1`/,
     );
     assert.deepEqual(readDocuments(root), before);
     assert.throws(
@@ -412,7 +412,7 @@ test("a new release version requires an explicit documentation transformation up
   try {
     assert.throws(
       () => finalizeReleaseDocs(root, "0.3.0", RELEASE_DATE),
-      /validator supports 0\.2\.0; update its supported version before releasing 0\.3\.0/,
+      /validator supports 0\.2\.1; update its supported version before releasing 0\.3\.0/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

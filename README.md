@@ -8,9 +8,9 @@ AnchorLoop lets an AI agent implement code without taking ownership away from th
 
 ## Status
 
-**Published production:** `anchorloop@0.2.0`
+**Published production:** `anchorloop@0.2.1`
 
-The `0.2.0` release contains the recovery, validation, ownership,
+The `0.2.1` release contains the recovery, validation, ownership,
 release-safety, and multi-agent installer work described below. Use the exact
 version in automation and installed skill metadata.
 
@@ -73,7 +73,7 @@ The source of truth is the local `anchor` CLI and the project’s `.anchor/` dir
 
 Every host gets the same task states and approval rules. Native integrations must remain thin adapters; they never own the workflow state.
 
-## What is implemented in the 0.2.0 release
+## What is implemented in the 0.2.1 release
 
 - `anchor install` and `anchor uninstall` preview then manage a packaged,
   project- or user-scoped skill adapter for Agent Skills, Codex, Cursor,
@@ -106,20 +106,20 @@ Every host gets the same task states and approval rules. Native integrations mus
 
 Graphify installation, full language-specific security tooling, project-specific test commands, external research, skill discovery, and native host adapters are planned next. AnchorLoop never installs them silently.
 
-## Install the published 0.2.0 package
+## Install the published 0.2.1 package
 
 Requirements: Node.js 18 or newer and Python 3.11 or newer.
 
 Use the exact published production version:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
 ~~~
 
 The guided setup is also available from the published package:
 
 ~~~sh
-npx --yes anchorloop@0.2.0 install --interactive
+npx --yes anchorloop@0.2.1 install --interactive
 ~~~
 
 The compact setup wizard asks where AnchorLoop should live:
@@ -174,14 +174,14 @@ This is a Git installation path, not a PyPI release. Afterward, run `anchor
 install ...` to add the optional portable skill adapter to a project or user
 skill directory.
 
-## Migrating from 0.1.0 to 0.2.0
+## Migrating from 0.1.0 to 0.2.1
 
-Do not delete `.anchor/`: it is the project workflow record. The `0.2.0`
+Do not delete `.anchor/`: it is the project workflow record. The `0.2.1`
 migration refreshes managed protocol/support files and skill assets while
 preserving task, rule, approval, and audit records. If an installed skill was
 edited locally, review and preserve that diff before using `--force`.
 
-See the [0.1.0 to 0.2.0 migration guide](docs/MIGRATION_0.2.md) for the required
+See the [0.1.0 to 0.2.1 migration guide](docs/MIGRATION_0.2.md) for the required
 `0.1.0` recovery preflight and exact-version upgrade procedure.
 
 ## Development from a checkout
@@ -385,7 +385,7 @@ index separately during that migration.
 - [Decision map](docs/ANCHOR_DECISION_MAP.md)
 - [Domain glossary](CONTEXT.md)
 - [Portable skill adapter](docs/PORTABLE_SKILL.md)
-- [Migration from 0.1.0 to 0.2.0](docs/MIGRATION_0.2.md)
+- [Migration from 0.1.0 to 0.2.1](docs/MIGRATION_0.2.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)

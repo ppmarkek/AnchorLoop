@@ -4,10 +4,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-// The 0.2.0 artifact has already been promoted. Release documentation is now
-// kept truthful in the source tree; this script validates the tagged checkout
-// instead of rewriting pre-release documentation into the npm payload.
-const SUPPORTED_VERSION = "0.2.0";
+// The 0.2.1 artifact uses production documentation kept truthful in the source
+// tree; this script validates the tagged checkout instead of rewriting release
+// metadata into the npm payload.
+const SUPPORTED_VERSION = "0.2.1";
 const RELEASE_DOCUMENT_PATHS = [
   "README.md",
   "CHANGELOG.md",

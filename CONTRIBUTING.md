@@ -1,6 +1,6 @@
 # Contributing to AnchorLoop
 
-`anchorloop@0.2.0` is the current published production release. Small,
+`anchorloop@0.2.1` is the current published production release. Small,
 testable changes that strengthen its local, agent-neutral workflow core are
 preferred over broad integrations.
 
@@ -34,7 +34,7 @@ in the normal suite; do not replace them with Linux-only mocks.
 ## npm launcher
 
 The optional exact-version npm route (for example,
-`npx --yes anchorloop@0.2.0 install`) requires Node.js 18 or newer and must
+`npx --yes anchorloop@0.2.1 install`) requires Node.js 18 or newer and must
 remain a thin launcher around the Python core. During development, exercise
 the checkout directly. When changing its package, launcher, or skill templates:
 
@@ -82,7 +82,7 @@ reproducibility claim. Hosted runner images and Python build tooling still
 receive upstream updates; do not claim binary reproducibility without a
 separately pinned toolchain and runner-image policy.
 
-`anchorloop@0.2.0` is the published production baseline. npm versions are
+`anchorloop@0.2.1` is the published production baseline. npm versions are
 immutable: verify that the exact next version does not exist before creating a
 release tag. The signed-tag workflow runs exact-tag CI, validates the
 documentation and package boundary, stages the tarball under `next` with

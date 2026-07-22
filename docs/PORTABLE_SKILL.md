@@ -6,19 +6,19 @@ engine and it never becomes the source of truth for task state.
 
 ## Install
 
-Published production is `anchorloop@0.2.0`. Its guided multi-agent installer
+Published production is `anchorloop@0.2.1`. Its guided multi-agent installer
 is available from the public npm registry.
 
 For production use, pin the published package explicitly:
 
 ~~~powershell
-npx --yes anchorloop@0.2.0 install --project --platform codex --apply
+npx --yes anchorloop@0.2.1 install --project --platform codex --apply
 ~~~
 
 To open the guided installer from the published package:
 
 ~~~powershell
-npx --yes anchorloop@0.2.0 install --interactive
+npx --yes anchorloop@0.2.1 install --interactive
 ~~~
 
 In an interactive terminal choose the current project or your user profile;
@@ -33,7 +33,7 @@ writes files.
 |---|---|---|
 | Filesystem destination/install matrix for `agents`, `codex`, `cursor`, `gemini`, `claude`, and `opencode` | **Verified** | Automated tests verify exact placement, owned assets, update, and uninstall behavior. This does not verify any host. |
 | Real-host skill discovery for every named host | **Experimental** | Each host must be opened and tested against its current release before discovery can be claimed. No host is marked Verified from filesystem placement alone. |
-| Native adapters, hooks, MCP, and other undiscovered host integrations | **Planned** | These remain separate opt-in integrations and are not part of the `0.2.0` release scope. |
+| Native adapters, hooks, MCP, and other undiscovered host integrations | **Planned** | These remain separate opt-in integrations and are not part of the `0.2.1` release scope. |
 
 Project setup uses `.agents/skills/anchorloop/`. Global setup writes the
 selected host's native directory, such as `~/.codex/skills/anchorloop/` or
@@ -53,7 +53,7 @@ anchor install --global --all --apply
 anchor install --global --all
 ~~~
 
-Automation may use the exact-version runner `npx --yes anchorloop@0.2.0 ...`.
+Automation may use the exact-version runner `npx --yes anchorloop@0.2.1 ...`.
 Keep release and automation commands pinned even if npm dist-tags change.
 
 For a project-scoped installation, AnchorLoop rejects symlink and Windows
@@ -126,7 +126,7 @@ approve a replacement in the same category, then record an explicit
 `anchor rules supersede <old> <new> --by <engineer> --reason <text>` action.
 
 For the complete package and project upgrade sequence, see
-[Migration from 0.1.0 to 0.2.0](MIGRATION_0.2.md).
+[Migration from 0.1.0 to 0.2.1](MIGRATION_0.2.md).
 
 ## Workflow contract
 
