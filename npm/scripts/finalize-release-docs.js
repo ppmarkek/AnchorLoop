@@ -30,6 +30,11 @@ function normalizeNewlines(value) {
   return value.replace(/\r\n/g, "\n");
 }
 
+function preserveNewlines(value, original) {
+  const newline = original.includes("\r\n") ? "\r\n" : "\n";
+  return value.replace(/\n/g, newline);
+}
+
 function assertReleaseDate(releaseDate) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate || "")) {
     throw new Error("Release artifact date must use YYYY-MM-DD from the tagged commit.");
@@ -149,7 +154,12 @@ function buildArtifactContents(root, version, releaseDate) {
 function finalizeReleaseDocs(root, version, releaseDate) {
   const outputs = buildArtifactContents(root, version, releaseDate);
   for (const [relativePath, content] of outputs) {
-    fs.writeFileSync(path.join(root, ...relativePath.split("/")), content, "utf8");
+    const absolutePath = path.join(root, ...relativePath.split("/"));
+    const original = fs.readFileSync(absolutePath, "utf8");
+    const finalized = preserveNewlines(content, original);
+    if (original !== finalized) {
+      fs.writeFileSync(absolutePath, finalized, "utf8");
+    }
   }
   return [...outputs.keys()];
 }
